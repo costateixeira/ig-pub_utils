@@ -33,7 +33,7 @@ if not exist "%PUBLISHER%" (
 )
 
 :: === ENSURE SUSHI IS UP TO DATE ===
-npm install -g fsh-sushi
+call npm install -g fsh-sushi
 
 :: === CLONE FUNCTION ===
 echo Cloning repositories...
