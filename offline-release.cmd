@@ -26,6 +26,15 @@ set "ASSETS=%WORKSPACE%\release-assets"
 set "PUBLISHER=%WORKSPACE%\publisher.jar"
 set "EXCLUDE=%WORKSPACE%\exclude.txt"
 
+:: === DOWNLOAD PUBLISHER.JAR IF NEEDED ===
+if not exist "%PUBLISHER%" (
+  echo Downloading publisher.jar...
+  curl -L -o "%PUBLISHER%" https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar
+)
+
+:: === ENSURE SUSHI IS UP TO DATE ===
+npm install -g fsh-sushi
+
 :: === CLONE FUNCTION ===
 echo Cloning repositories...
 
