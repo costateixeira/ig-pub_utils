@@ -541,7 +541,7 @@ if tk:
             colors = self.get_current_colors()
             
             field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
-            field_frame.pack(fill=tk.X, pady=15, padx=20)  # Much better spacing
+            field_frame.pack(fill=tk.X, expand=True, pady=15, padx=20)
             
             # Label with icon
             label_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
@@ -566,54 +566,59 @@ if tk:
                            relief=tk.FLAT, bd=0, highlightthickness=2,
                            highlightcolor=colors['accent'],
                            highlightbackground=colors['border'])
-            entry.pack(fill=tk.X, ipady=8)  # Better height
+            entry.pack(fill=tk.X, expand=True, ipady=8)  # Better height
             
             return entry
         
         def create_source_tab(self, parent):
             """Create source configuration tab with proper spacing"""
             colors = self.get_current_colors()
-            
-            # Create a scrollable frame for the content
-            canvas = tk.Canvas(parent, bg=colors['bg_secondary'], highlightthickness=0)
-            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
-            
-            scrollable_frame.bind(
-                "<Configure>",
-                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-            )
-            
-            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
-            
-            # Enable mouse wheel scrolling
-            def _on_mousewheel(event):
-                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
-            
-            # Pack the canvas and scrollbar
-            canvas.pack(side="left", fill="both", expand=True)
+
+            # Container for canvas and scrollbar
+            scrollable_container = tk.Frame(parent, bg=colors['bg_secondary'])
+            scrollable_container.pack(side="top", fill="both", expand=True)
+
+            # Canvas and scrollbar
+            canvas = tk.Canvas(scrollable_container, bg=colors['bg_secondary'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scrollable_container, orient="vertical", command=canvas.yview)
             scrollbar.pack(side="right", fill="y")
-            
-            # Section title with better spacing
+            canvas.pack(side="left", fill="both", expand=True)
+
+            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+
+            window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+            def update_scrollregion(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            scrollable_frame.bind("<Configure>", update_scrollregion)
+
+            # Optional: match width of scrollable frame to canvas
+            def resize_scrollable(event):
+                canvas.itemconfig(window_id, width=event.width)
+            canvas.bind("<Configure>", resize_scrollable)
+
+            # Mouse wheel scroll
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+            # --- Your content inside scrollable_frame ---
             title_label = tk.Label(scrollable_frame, text="Source Configuration",
-                                 font=self.fonts['subheading'],
-                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
+                                font=self.fonts['subheading'],
+                                bg=colors['bg_secondary'], fg=colors['text_primary'])
             title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
-            
-            # Fields with better spacing
+
             self.create_field(scrollable_frame, "Source Repository URL", 
                             "Git repository containing your FHIR IG source files",
                             self.source_repo, "🌐")
-            
+
             self.create_field(scrollable_frame, "Source Branch", 
                             "Specific branch or tag to use from the source repository",
                             self.source_branch, "🔀")
-            
-            # Local directory with browse button
+
             self.create_directory_field(scrollable_frame)
-        
+                
         def create_directory_field(self, parent):
             """Create directory field with browse button and proper spacing"""
             colors = self.get_current_colors()
@@ -631,7 +636,7 @@ if tk:
             desc_label = tk.Label(field_frame, text="Use existing local directory instead of cloning from repository",
                                 font=self.fonts['small'], 
                                 bg=colors['bg_secondary'], fg=colors['text_muted'])
-            desc_label.pack(anchor=tk.W, pady=(3, 10))  # Better spacing
+            desc_label.pack(anchor=tk.W, pady=(5, 10))  # Better spacing
             
             # Entry and button frame
             entry_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
@@ -657,48 +662,63 @@ if tk:
                                  padx=15, pady=8)  # Better padding
             browse_btn.pack(side=tk.RIGHT, padx=(15, 0))  # Better spacing
         
+
+
         def create_repository_tab(self, parent):
             """Create repository configuration tab with proper spacing"""
             colors = self.get_current_colors()
-            
-            # Create a scrollable frame for the content
-            canvas = tk.Canvas(parent, bg=colors['bg_secondary'], highlightthickness=0)
-            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
-            
-            scrollable_frame.bind(
-                "<Configure>",
-                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-            )
-            
-            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
-            
-            # Pack the canvas and scrollbar
+
+            # Container for canvas + scrollbar
+            scrollable_container = tk.Frame(parent, bg=colors['bg_secondary'])
+            scrollable_container.pack(side="top", fill="both", expand=True)
+
+            # Canvas + scrollbar
+            canvas = tk.Canvas(scrollable_container, bg=colors['bg_secondary'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scrollable_container, orient="vertical", command=canvas.yview)
             canvas.pack(side="left", fill="both", expand=True)
             scrollbar.pack(side="right", fill="y")
-            
-            # Section title with better spacing
+
+            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+            window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+            # Update scrollregion when content changes
+            def update_scrollregion(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            scrollable_frame.bind("<Configure>", update_scrollregion)
+
+            # Match scrollable_frame width to canvas width
+            def resize_scrollable(event):
+                canvas.itemconfig(window_id, width=event.width)
+            canvas.bind("<Configure>", resize_scrollable)
+
+            # Optional: mousewheel scrolling
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+            # ---- Content ----
             title_label = tk.Label(scrollable_frame, text="Repository Configuration",
-                                 font=self.fonts['subheading'],
-                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
+                                font=self.fonts['subheading'],
+                                bg=colors['bg_secondary'], fg=colors['text_primary'])
             title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
-            
+
             self.create_field(scrollable_frame, "History Repository URL",
                             "Repository containing the IG history template for version management",
                             self.history_repo, "📚")
-            
+
             self.create_field(scrollable_frame, "History Branch",
                             "Branch to use from the history repository",
                             self.history_branch, "🌿")
-            
+
             self.create_field(scrollable_frame, "Webroot Repository URL",
                             "Repository containing web publishing templates and assets",
                             self.webroot_repo, "🌍")
-            
+
             self.create_field(scrollable_frame, "Webroot Branch",
                             "Branch to use from the webroot repository", 
                             self.webroot_branch, "🌳")
+
         
         def create_advanced_tab(self, parent):
             """Create advanced options tab"""
@@ -765,7 +785,7 @@ if tk:
             
             # Example - more compact
             example_frame = tk.Frame(self.sparse_dir_frame, bg=colors['bg_accent'])
-            example_frame.pack(fill=tk.X, pady=(5, 0))  # Reduced padding
+            example_frame.pack(fill=tk.X, pady=(5, 15))  # Reduced padding
             
             example_label = tk.Label(example_frame, text="💡 Example:",
                                    font=self.fonts['small'],
