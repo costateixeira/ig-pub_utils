@@ -1,0 +1,843 @@
+import os
+import sys
+import subprocess
+import logging
+import argparse
+import yaml
+import threading
+from datetime import datetime
+
+try:
+    import git
+except ImportError:
+    print("Installing GitPython...")
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'gitpython'])
+    import git
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox, scrolledtext
+    import tkinter.font as tkfont
+except ImportError:
+    tk = None
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+CONFIG_FILE = "release-config.yaml"
+
+class ReleasePublisher:
+    def __init__(self, source_dir=None, source_repo=None, source_branch=None,
+                 webroot_repo=None, webroot_branch=None,
+                 history_repo=None, history_branch=None,
+                 sparse_dirs=None, enable_sparse_checkout=False, progress_callback=None):
+
+        self.base_dir = os.path.abspath(os.path.dirname(__file__))
+        self.source_dir = source_dir or os.path.join(self.base_dir, 'source')
+        self.source_repo = source_repo
+        self.source_branch = source_branch
+        self.webroot_repo = webroot_repo or 'https://github.com/WorldHealthOrganization/smart-html'
+        self.webroot_branch = webroot_branch
+        self.history_repo = history_repo or 'https://github.com/HL7/fhir-ig-history-template'
+        self.history_branch = history_branch
+        self.registry_repo = 'https://github.com/FHIR/ig-registry'
+
+        self.webroot_dir = os.path.join(self.base_dir, 'webroot')
+        self.history_dir = os.path.join(self.base_dir, 'history-template')
+        self.registry_dir = os.path.join(self.base_dir, 'ig-registry')
+        self.package_cache = os.path.join(self.base_dir, 'fhir-package-cache')
+        self.temp_dir = os.path.join(self.base_dir, 'temp')
+        self.publisher_jar = os.path.join(self.base_dir, 'publisher.jar')
+        
+        self.sparse_dirs = sparse_dirs
+        self.enable_sparse_checkout = enable_sparse_checkout
+        self.progress_callback = progress_callback
+
+    def log_progress(self, message):
+        logging.info(message)
+        if self.progress_callback:
+            self.progress_callback(message)
+
+    def run_command(self, cmd, shell=False):
+        cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        self.log_progress(f"Running: {cmd_str}")
+        subprocess.run(cmd, shell=shell, check=True)
+
+    def clone_repo(self, url, path, branch=None, use_sparse=False, sparse_dirs=None):
+        if os.path.exists(path):
+            self.log_progress(f"Updating existing repository: {path}")
+            try:
+                repo = git.Repo(path)
+                repo.git.reset('--hard')
+                repo.remotes.origin.pull()
+            except Exception as e:
+                self.log_progress(f"Warning: Failed to update {path}: {e}")
+            return
+            
+        if use_sparse and sparse_dirs:
+            self.log_progress(f"Cloning with sparse checkout: {url}")
+            self.run_command(['git', 'clone', '--depth=1', '--filter=blob:none', '--sparse', url, path])
+            original_cwd = os.getcwd()
+            os.chdir(path)
+            try:
+                self.run_command(['git', 'sparse-checkout', 'init'])
+                self.run_command(['git', 'sparse-checkout', 'set'] + sparse_dirs)
+                self.log_progress(f"Sparse checkout configured for: {' '.join(sparse_dirs)}")
+            finally:
+                os.chdir(original_cwd)
+        else:
+            self.log_progress(f"Cloning repository: {url}")
+            clone_cmd = ['git', 'clone', '--depth=1']
+            if branch:
+                clone_cmd += ['--branch', branch]
+            clone_cmd += [url, path]
+            self.run_command(clone_cmd)
+
+    def prepare(self):
+        self.log_progress("🔄 Preparing repositories...")
+        
+        self.clone_repo(self.history_repo, self.history_dir, self.history_branch)
+        
+        self.clone_repo(
+            self.webroot_repo, 
+            self.webroot_dir, 
+            self.webroot_branch, 
+            use_sparse=self.enable_sparse_checkout,
+            sparse_dirs=self.sparse_dirs
+        )
+        
+        self.clone_repo(self.registry_repo, self.registry_dir)
+
+        if self.source_repo:
+            self.clone_repo(self.source_repo, self.source_dir, self.source_branch)
+
+        if not os.path.exists(self.publisher_jar):
+            self.log_progress("📥 Downloading FHIR IG Publisher...")
+            self.run_command([
+                'curl', '-L',
+                'https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar',
+                '-o', self.publisher_jar
+            ])
+
+        os.makedirs(self.package_cache, exist_ok=True)
+
+    def build(self):
+        self.log_progress("🔨 Building Implementation Guide...")
+        self.run_command([
+            'java', '-Xmx4g', '-jar', self.publisher_jar,
+            'publisher', '-ig', self.source_dir,
+            '-package-cache-folder', self.package_cache
+        ])
+
+    def publish(self):
+        self.log_progress("📤 Publishing Implementation Guide...")
+        self.run_command([
+            'java', '-Xmx4g', '-Dfile.encoding=UTF-8', '-jar', self.publisher_jar,
+            '-go-publish',
+            '-package-cache-folder', self.package_cache,
+            '-source', self.source_dir,
+            '-web', self.webroot_dir,
+            '-temp', self.temp_dir,
+            '-registry', os.path.join(self.registry_dir, 'fhir-ig-list.json'),
+            '-history', self.history_dir,
+            '-templates', os.path.join(self.webroot_dir, 'templates')
+        ])
+
+    def run(self):
+        try:
+            self.prepare()
+            self.build()
+            self.publish()
+            self.log_progress("✅ Publication completed successfully!")
+        except Exception as e:
+            self.log_progress(f"❌ Error: {str(e)}")
+            raise
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    return {}
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(config, f, default_flow_style=False)
+
+if tk:
+    class ModernFHIRPublisherGUI:
+        def __init__(self):
+            self.root = tk.Tk()
+            self.root.title("FHIR IG Publisher")
+            self.root.geometry("1200x900")
+            self.root.minsize(900, 700)
+            
+            # Initialize theme
+            self.is_dark_theme = False
+            self.setup_colors()
+            self.setup_fonts()
+            self.setup_styles()
+            
+            # Load configuration
+            config = load_config()
+            self.setup_variables(config)
+            
+            # Create the interface
+            self.create_interface()
+            
+            # Center window
+            self.center_window()
+            
+            # Apply initial theme
+            self.apply_theme()
+            
+        def setup_colors(self):
+            """Define color schemes for light and dark themes"""
+            self.colors = {
+                'light': {
+                    'bg_primary': '#F8F9FF',
+                    'bg_secondary': '#FFFFFF', 
+                    'bg_accent': '#E8E5FF',
+                    'text_primary': '#2D3748',
+                    'text_secondary': '#4A5568',
+                    'text_muted': '#718096',
+                    'accent': '#6C63FF',
+                    'accent_hover': '#5A52D5',
+                    'success': '#48BB78',
+                    'warning': '#ED8936',
+                    'error': '#E53E3E',
+                    'border': '#E2E8F0',
+                    'button_bg': '#6C63FF',
+                    'button_hover': '#5A52D5'
+                },
+                'dark': {
+                    'bg_primary': '#1A202C',
+                    'bg_secondary': '#2D3748',
+                    'bg_accent': '#4A5568',
+                    'text_primary': '#F7FAFC',
+                    'text_secondary': '#E2E8F0',
+                    'text_muted': '#A0AEC0',
+                    'accent': '#90CDF4',
+                    'accent_hover': '#63B3ED',
+                    'success': '#68D391',
+                    'warning': '#F6AD55',
+                    'error': '#FC8181',
+                    'border': '#4A5568',
+                    'button_bg': '#4299E1',
+                    'button_hover': '#3182CE'
+                }
+            }
+        
+        def setup_fonts(self):
+            """Setup custom fonts"""
+            try:
+                self.fonts = {
+                    'heading': tkfont.Font(family="Segoe UI", size=24, weight="bold"),
+                    'subheading': tkfont.Font(family="Segoe UI", size=16, weight="bold"),
+                    'body': tkfont.Font(family="Segoe UI", size=10),
+                    'body_bold': tkfont.Font(family="Segoe UI", size=10, weight="bold"),
+                    'small': tkfont.Font(family="Segoe UI", size=9),
+                    'button': tkfont.Font(family="Segoe UI", size=10, weight="bold"),
+                    'code': tkfont.Font(family="Consolas", size=9)
+                }
+            except:
+                # Fallback fonts
+                self.fonts = {
+                    'heading': tkfont.Font(size=18, weight="bold"),
+                    'subheading': tkfont.Font(size=12, weight="bold"),
+                    'body': tkfont.Font(size=10),
+                    'body_bold': tkfont.Font(size=10, weight="bold"),
+                    'small': tkfont.Font(size=9),
+                    'button': tkfont.Font(size=10, weight="bold"),
+                    'code': tkfont.Font(family="Courier", size=9)
+                }
+        
+        def setup_styles(self):
+            """Setup ttk styles"""
+            self.style = ttk.Style()
+            
+            # Configure notebook style
+            self.style.configure('Modern.TNotebook', borderwidth=0, relief='flat')
+            self.style.configure('Modern.TNotebook.Tab', 
+                               padding=[20, 12], 
+                               font=self.fonts['body_bold'])
+            
+        def get_current_colors(self):
+            """Get current theme colors"""
+            return self.colors['dark' if self.is_dark_theme else 'light']
+        
+        def apply_theme(self):
+            """Apply current theme colors to all widgets"""
+            colors = self.get_current_colors()
+            
+            # Root window
+            self.root.configure(bg=colors['bg_primary'])
+            
+            # Update ttk styles
+            self.style.configure('Modern.TNotebook', background=colors['bg_secondary'])
+            self.style.configure('Modern.TNotebook.Tab',
+                               background=colors['bg_accent'],
+                               foreground=colors['text_secondary'],
+                               lightcolor=colors['border'],
+                               borderwidth=1)
+            self.style.map('Modern.TNotebook.Tab',
+                          background=[('selected', colors['bg_secondary'])],
+                          foreground=[('selected', colors['accent'])])
+            
+            # Update all frames
+            for widget in self.root.winfo_children():
+                self.update_widget_colors(widget, colors)
+        
+        def update_widget_colors(self, widget, colors):
+            """Recursively update widget colors"""
+            widget_class = widget.winfo_class()
+            
+            if widget_class == 'Frame':
+                widget.configure(bg=colors['bg_secondary'])
+            elif widget_class == 'Label':
+                widget.configure(bg=colors['bg_secondary'], fg=colors['text_primary'])
+            elif widget_class == 'Entry':
+                widget.configure(bg=colors['bg_primary'], fg=colors['text_primary'],
+                               insertbackground=colors['text_primary'])
+            elif widget_class == 'Button':
+                if hasattr(widget, 'is_primary') and widget.is_primary:
+                    widget.configure(bg=colors['button_bg'], fg='white',
+                                   activebackground=colors['button_hover'])
+                else:
+                    widget.configure(bg=colors['bg_accent'], fg=colors['text_primary'],
+                                   activebackground=colors['border'])
+            elif widget_class == 'Checkbutton':
+                widget.configure(bg=colors['bg_secondary'], fg=colors['text_primary'],
+                               activebackground=colors['bg_secondary'])
+            elif widget_class == 'Text':
+                widget.configure(bg=colors['bg_primary'], fg=colors['text_primary'],
+                               insertbackground=colors['text_primary'])
+            
+            # Recursively update children
+            for child in widget.winfo_children():
+                self.update_widget_colors(child, colors)
+        
+        def toggle_theme(self):
+            """Toggle between light and dark theme"""
+            self.is_dark_theme = not self.is_dark_theme
+            self.theme_button.configure(text="☀️" if self.is_dark_theme else "🌙")
+            self.apply_theme()
+        
+        def setup_variables(self, config):
+            """Initialize tkinter variables with config values"""
+            self.source_repo = tk.StringVar(value=config.get('source_repo', 'https://github.com/WorldHealthOrganization/smart-dak-pnc'))
+            self.source_branch = tk.StringVar(value=config.get('source_branch', 'v0.9.9_releaseCandidate'))
+            self.source_dir = tk.StringVar(value=config.get('source_dir', ''))
+            self.history_repo = tk.StringVar(value=config.get('history_repo', 'https://github.com/HL7/fhir-ig-history-template'))
+            self.history_branch = tk.StringVar(value=config.get('history_branch', 'main'))
+            self.webroot_repo = tk.StringVar(value=config.get('webroot_repo', 'https://github.com/WorldHealthOrganization/smart-html'))
+            self.webroot_branch = tk.StringVar(value=config.get('webroot_branch', 'main'))
+            self.enable_sparse_checkout = tk.BooleanVar(value=config.get('enable_sparse_checkout', False))
+            self.sparse_dirs = tk.StringVar(value=' '.join(config.get('sparse_dirs', ['templates', 'assets'])))
+        
+        def center_window(self):
+            """Center the window on screen"""
+            self.root.update_idletasks()
+            width = self.root.winfo_width()
+            height = self.root.winfo_height()
+            x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+            y = (self.root.winfo_screenheight() // 2) - (height // 2)
+            self.root.geometry(f'{width}x{height}+{x}+{y}')
+        
+        def create_interface(self):
+            """Create the main interface"""
+            colors = self.get_current_colors()
+            
+            # Main container
+            main_frame = tk.Frame(self.root, bg=colors['bg_primary'], padx=20, pady=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Header section
+            self.create_header(main_frame)
+            
+            # Content notebook - DON'T let it expand infinitely
+            self.create_notebook(main_frame)
+            
+            # Action buttons - ALWAYS visible at bottom
+            self.create_action_buttons(main_frame)
+            
+            # Progress section
+            self.create_progress_section(main_frame)
+        
+        def create_header(self, parent):
+            """Create the compact header section with aligned title and theme toggle"""
+            colors = self.get_current_colors()
+            
+            header_frame = tk.Frame(parent, bg=colors['bg_secondary'], 
+                                  relief=tk.FLAT, bd=0)
+            header_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            # Single horizontal container for title and theme toggle
+            title_frame = tk.Frame(header_frame, bg=colors['bg_secondary'])
+            title_frame.pack(fill=tk.X, padx=20, pady=15)
+            
+            # Left side - Icon and title text
+            left_content = tk.Frame(title_frame, bg=colors['bg_secondary'])
+            left_content.pack(side=tk.LEFT, anchor=tk.W)
+            
+            # Horizontal layout for icon and title text
+            title_container = tk.Frame(left_content, bg=colors['bg_secondary'])
+            title_container.pack(anchor=tk.W)
+            
+            # Icon
+            icon_label = tk.Label(title_container, text="🧬", font=('Segoe UI', 24),
+                                bg=colors['bg_secondary'])
+            icon_label.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # Title and subtitle container
+            text_container = tk.Frame(title_container, bg=colors['bg_secondary'])
+            text_container.pack(side=tk.LEFT, anchor=tk.W)
+            
+            # Title
+            title_label = tk.Label(text_container, text="FHIR IG Publisher", 
+                                 font=tkfont.Font(family="Segoe UI", size=16, weight="bold"),
+                                 bg=colors['bg_secondary'], 
+                                 fg=colors['accent'])
+            title_label.pack(anchor=tk.W)
+            
+            # Subtitle
+            subtitle_label = tk.Label(text_container, 
+                                    text="Configure and publish FHIR Implementation Guides",
+                                    font=tkfont.Font(family="Segoe UI", size=9),
+                                    bg=colors['bg_secondary'], 
+                                    fg=colors['text_muted'])
+            subtitle_label.pack(anchor=tk.W)
+            
+            # Right side - Theme toggle button (aligned with title)
+            self.theme_button = tk.Button(title_frame, text="🌙", 
+                                        command=self.toggle_theme,
+                                        font=('Segoe UI', 12), 
+                                        relief=tk.FLAT,
+                                        bg=colors['bg_accent'],
+                                        fg=colors['text_primary'],
+                                        padx=8, pady=4)
+            self.theme_button.pack(side=tk.RIGHT, anchor=tk.E)
+        
+        def create_notebook(self, parent):
+            """Create the compact tabbed notebook interface"""
+            colors = self.get_current_colors()
+            
+            # Notebook with LIMITED height - this is the key fix!
+            self.notebook = ttk.Notebook(parent, style='Modern.TNotebook', height=400)
+            self.notebook.pack(fill=tk.X, pady=(0, 10))  # Only fill X, not BOTH, no expand
+            
+            # Source tab - more compact
+            source_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            self.notebook.add(source_frame, text="📂  Source Configuration")
+            self.create_source_tab(source_frame)
+            
+            # Repository tab - more compact
+            repo_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            self.notebook.add(repo_frame, text="🔗  Repository Settings")
+            self.create_repository_tab(repo_frame)
+            
+            # Advanced tab - more compact
+            advanced_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            self.notebook.add(advanced_frame, text="⚡  Advanced Options")
+            self.create_advanced_tab(advanced_frame)
+        
+        def create_field(self, parent, label_text, description, variable, icon=""):
+            """Create a compact modern field with label, description, and entry"""
+            colors = self.get_current_colors()
+            
+            field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
+            field_frame.pack(fill=tk.X, pady=8)  # Reduced from 15
+            
+            # Label with icon
+            label_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
+            label_frame.pack(fill=tk.X)
+            
+            label = tk.Label(label_frame, text=f"{icon} {label_text}" if icon else label_text,
+                           font=self.fonts['body_bold'], 
+                           bg=colors['bg_secondary'], fg=colors['text_primary'])
+            label.pack(anchor=tk.W)
+            
+            # Description
+            desc_label = tk.Label(field_frame, text=description,
+                                font=self.fonts['small'], 
+                                bg=colors['bg_secondary'], fg=colors['text_muted'])
+            desc_label.pack(anchor=tk.W, pady=(1, 5))  # Reduced padding
+            
+            # Entry field
+            entry = tk.Entry(field_frame, textvariable=variable, 
+                           font=self.fonts['body'],
+                           bg=colors['bg_primary'], fg=colors['text_primary'],
+                           insertbackground=colors['text_primary'],
+                           relief=tk.FLAT, bd=0, highlightthickness=2,
+                           highlightcolor=colors['accent'],
+                           highlightbackground=colors['border'])
+            entry.pack(fill=tk.X, ipady=6)  # Reduced from 8
+            
+            return entry
+        
+        def create_source_tab(self, parent):
+            """Create source configuration tab"""
+            colors = self.get_current_colors()
+            
+            # Compact section title
+            title_label = tk.Label(parent, text="Source Configuration",
+                                 font=self.fonts['subheading'],
+                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
+            title_label.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            
+            # Fields
+            self.create_field(parent, "Source Repository URL", 
+                            "Git repository containing your FHIR IG source files",
+                            self.source_repo, "🌐")
+            
+            self.create_field(parent, "Source Branch", 
+                            "Specific branch or tag to use from the source repository",
+                            self.source_branch, "🔀")
+            
+            # Local directory with browse button
+            self.create_directory_field(parent)
+        
+        def create_directory_field(self, parent):
+            """Create compact directory field with browse button"""
+            colors = self.get_current_colors()
+            
+            field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
+            field_frame.pack(fill=tk.X, pady=8)  # Reduced padding
+            
+            # Label
+            label = tk.Label(field_frame, text="📁 Local Source Directory (Optional)",
+                           font=self.fonts['body_bold'], 
+                           bg=colors['bg_secondary'], fg=colors['text_primary'])
+            label.pack(anchor=tk.W)
+            
+            # Description
+            desc_label = tk.Label(field_frame, text="Use existing local directory instead of cloning from repository",
+                                font=self.fonts['small'], 
+                                bg=colors['bg_secondary'], fg=colors['text_muted'])
+            desc_label.pack(anchor=tk.W, pady=(1, 5))  # Reduced padding
+            
+            # Entry and button frame
+            entry_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
+            entry_frame.pack(fill=tk.X)
+            
+            # Entry
+            self.source_dir_entry = tk.Entry(entry_frame, textvariable=self.source_dir,
+                                           font=self.fonts['body'],
+                                           bg=colors['bg_primary'], fg=colors['text_primary'],
+                                           insertbackground=colors['text_primary'],
+                                           relief=tk.FLAT, bd=0, highlightthickness=2,
+                                           highlightcolor=colors['accent'],
+                                           highlightbackground=colors['border'])
+            self.source_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)  # Reduced padding
+            
+            # Browse button
+            browse_btn = tk.Button(entry_frame, text="🔍 Browse", 
+                                 command=self.browse_source_directory,
+                                 font=self.fonts['button'],
+                                 bg=colors['bg_accent'], fg=colors['text_primary'],
+                                 relief=tk.FLAT, padx=15, pady=6)  # Reduced padding
+            browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        def create_repository_tab(self, parent):
+            """Create repository configuration tab"""
+            colors = self.get_current_colors()
+            
+            title_label = tk.Label(parent, text="Repository Configuration",
+                                 font=self.fonts['subheading'],
+                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
+            title_label.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            
+            self.create_field(parent, "History Repository URL",
+                            "Repository containing the IG history template for version management",
+                            self.history_repo, "📚")
+            
+            self.create_field(parent, "History Branch",
+                            "Branch to use from the history repository",
+                            self.history_branch, "🌿")
+            
+            self.create_field(parent, "Webroot Repository URL",
+                            "Repository containing web publishing templates and assets",
+                            self.webroot_repo, "🌍")
+            
+            self.create_field(parent, "Webroot Branch",
+                            "Branch to use from the webroot repository", 
+                            self.webroot_branch, "🌳")
+        
+        def create_advanced_tab(self, parent):
+            """Create advanced options tab"""
+            colors = self.get_current_colors()
+            
+            title_label = tk.Label(parent, text="Advanced Configuration",
+                                 font=self.fonts['subheading'],
+                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
+            title_label.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            
+            # Sparse checkout section - more compact
+            sparse_frame = tk.Frame(parent, bg=colors['bg_accent'], relief=tk.FLAT, bd=1)
+            sparse_frame.pack(fill=tk.X, pady=10)  # Reduced padding
+            
+            sparse_content = tk.Frame(sparse_frame, bg=colors['bg_accent'])
+            sparse_content.pack(fill=tk.BOTH, padx=15, pady=15)  # Reduced padding
+            
+            # Section title
+            sparse_title = tk.Label(sparse_content, text="⚡ Sparse Checkout Optimization",
+                                  font=self.fonts['body_bold'],
+                                  bg=colors['bg_accent'], fg=colors['accent'])
+            sparse_title.pack(anchor=tk.W)
+            
+            # Description
+            sparse_desc = tk.Label(sparse_content, 
+                                 text="Optimize clone performance by downloading only specific folders",
+                                 font=self.fonts['small'],
+                                 bg=colors['bg_accent'], fg=colors['text_muted'])
+            sparse_desc.pack(anchor=tk.W, pady=(1, 10))  # Reduced padding
+            
+            # Checkbox
+            self.sparse_checkbox = tk.Checkbutton(sparse_content, 
+                                                text="Enable sparse checkout for webroot repository",
+                                                variable=self.enable_sparse_checkout,
+                                                font=self.fonts['body_bold'],
+                                                bg=colors['bg_accent'], fg=colors['text_primary'],
+                                                activebackground=colors['bg_accent'],
+                                                command=self.toggle_sparse_fields)
+            self.sparse_checkbox.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            
+            # Sparse directories field
+            self.sparse_dir_frame = tk.Frame(sparse_content, bg=colors['bg_accent'])
+            self.sparse_dir_frame.pack(fill=tk.X)
+            
+            sparse_label = tk.Label(self.sparse_dir_frame, text="📁 Folders to Download",
+                                  font=self.fonts['body_bold'],
+                                  bg=colors['bg_accent'], fg=colors['text_primary'])
+            sparse_label.pack(anchor=tk.W)
+            
+            sparse_desc2 = tk.Label(self.sparse_dir_frame, 
+                                  text="Space-separated list of directories to include in the clone",
+                                  font=self.fonts['small'],
+                                  bg=colors['bg_accent'], fg=colors['text_muted'])
+            sparse_desc2.pack(anchor=tk.W, pady=(1, 5))  # Reduced padding
+            
+            self.sparse_entry = tk.Entry(self.sparse_dir_frame, textvariable=self.sparse_dirs,
+                                       font=self.fonts['code'],
+                                       bg=colors['bg_primary'], fg=colors['text_primary'],
+                                       insertbackground=colors['text_primary'],
+                                       relief=tk.FLAT, bd=0, highlightthickness=2,
+                                       highlightcolor=colors['accent'],
+                                       highlightbackground=colors['border'])
+            self.sparse_entry.pack(fill=tk.X, ipady=6)  # Reduced padding
+            
+            # Example - more compact
+            example_frame = tk.Frame(self.sparse_dir_frame, bg=colors['bg_accent'])
+            example_frame.pack(fill=tk.X, pady=(5, 0))  # Reduced padding
+            
+            example_label = tk.Label(example_frame, text="💡 Example:",
+                                   font=self.fonts['small'],
+                                   bg=colors['bg_accent'], fg=colors['warning'])
+            example_label.pack(side=tk.LEFT)
+            
+            example_text = tk.Label(example_frame, text="templates assets css js images",
+                                  font=self.fonts['code'],
+                                  bg=colors['bg_accent'], fg=colors['text_muted'])
+            example_text.pack(side=tk.LEFT, padx=(5, 0))
+            
+            # Initialize sparse field state
+            self.toggle_sparse_fields()
+        
+        def create_action_buttons(self, parent):
+            """Create prominent action buttons - ALWAYS visible"""
+            colors = self.get_current_colors()
+            
+            # Make button frame more prominent with a border - FORCE it to be visible
+            button_frame = tk.Frame(parent, bg=colors['button_bg'], relief=tk.RAISED, bd=3)
+            button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)  # Force to bottom
+            
+            # Add some padding inside the frame
+            button_inner = tk.Frame(button_frame, bg=colors['button_bg'])
+            button_inner.pack(fill=tk.X, padx=20, pady=15)
+            
+            # Create a centered container for buttons
+            button_container = tk.Frame(button_inner, bg=colors['button_bg'])
+            button_container.pack(anchor=tk.CENTER)
+            
+            # Save button
+            save_btn = tk.Button(button_container, text="💾 SAVE CONFIG",
+                               command=self.save_configuration,
+                               font=tkfont.Font(family="Segoe UI", size=11, weight="bold"),
+                               bg='#FF9800', fg='white',
+                               relief=tk.RAISED, bd=2, padx=20, pady=12,
+                               cursor='hand2')
+            save_btn.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # Run button - made very prominent
+            self.run_btn = tk.Button(button_container, text="🚀 RUN PUBLISHER",
+                                   command=self.run_publisher_threaded,
+                                   font=tkfont.Font(family="Segoe UI", size=12, weight="bold"),
+                                   bg='#4CAF50', fg='white',
+                                   relief=tk.RAISED, bd=4, padx=20, pady=12,
+                                   cursor='hand2',
+                                   activebackground='#45a049')
+            self.run_btn.is_primary = True
+            self.run_btn.pack(side=tk.LEFT)
+            
+            # Add a label to make it super obvious
+            info_label = tk.Label(button_inner, text="👆 Click RUN PUBLISHER to start processing",
+                                font=tkfont.Font(family="Segoe UI", size=9),
+                                bg=colors['button_bg'], fg='white')
+            info_label.pack(pady=(10, 0))
+        
+        def create_progress_section(self, parent):
+            """Create progress section"""
+            colors = self.get_current_colors()
+            
+            self.progress_frame = tk.Frame(parent, bg=colors['bg_primary'])
+            
+            # Progress label
+            self.progress_label = tk.Label(self.progress_frame, text="",
+                                         font=self.fonts['body_bold'],
+                                         bg=colors['bg_primary'], fg=colors['accent'])
+            self.progress_label.pack(pady=(0, 10))
+            
+            # Progress text area
+            self.progress_text = scrolledtext.ScrolledText(self.progress_frame,
+                                                         height=12,
+                                                         font=self.fonts['small'],
+                                                         bg=colors['bg_secondary'],
+                                                         fg=colors['text_primary'],
+                                                         insertbackground=colors['text_primary'],
+                                                         relief=tk.FLAT, bd=0)
+            self.progress_text.pack(fill=tk.BOTH, expand=True)
+        
+        def toggle_sparse_fields(self):
+            """Toggle sparse directory fields based on checkbox state"""
+            if self.enable_sparse_checkout.get():
+                self.sparse_entry.configure(state='normal')
+            else:
+                self.sparse_entry.configure(state='disabled')
+        
+        def browse_source_directory(self):
+            """Open directory browser for source directory"""
+            directory = filedialog.askdirectory(title="Select FHIR IG Source Directory")
+            if directory:
+                self.source_dir.set(directory)
+        
+        def save_configuration(self):
+            """Save current configuration to YAML file"""
+            config = {
+                'source_repo': self.source_repo.get(),
+                'source_branch': self.source_branch.get(),
+                'source_dir': self.source_dir.get(),
+                'history_repo': self.history_repo.get(),
+                'history_branch': self.history_branch.get(),
+                'webroot_repo': self.webroot_repo.get(),
+                'webroot_branch': self.webroot_branch.get(),
+                'enable_sparse_checkout': self.enable_sparse_checkout.get(),
+                'sparse_dirs': self.sparse_dirs.get().split() if self.sparse_dirs.get().strip() else []
+            }
+            
+            try:
+                save_config(config)
+                messagebox.showinfo("Success", "✅ Configuration saved successfully!")
+            except Exception as e:
+                messagebox.showerror("Error", f"❌ Failed to save configuration:\n{e}")
+        
+        def update_progress(self, message):
+            """Update progress display"""
+            self.progress_label.configure(text="🔄 Processing...")
+            self.progress_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
+            self.progress_text.see(tk.END)
+            self.root.update_idletasks()
+        
+        def show_progress(self):
+            """Show progress section"""
+            self.progress_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
+            self.progress_text.delete(1.0, tk.END)
+        
+        def hide_progress(self):
+            """Hide progress section"""
+            self.progress_frame.pack_forget()
+        
+        def run_publisher_threaded(self):
+            """Run publisher in separate thread"""
+            def run_in_thread():
+                try:
+                    # Show progress
+                    self.root.after(0, self.show_progress)
+                    
+                    # Prepare sparse directories
+                    sparse_dirs = None
+                    if self.enable_sparse_checkout.get() and self.sparse_dirs.get().strip():
+                        sparse_dirs = self.sparse_dirs.get().split()
+                    
+                    # Create publisher instance
+                    publisher = ReleasePublisher(
+                        source_dir=self.source_dir.get() or None,
+                        source_repo=self.source_repo.get() or None,
+                        source_branch=self.source_branch.get() or None,
+                        webroot_repo=self.webroot_repo.get() or None,
+                        webroot_branch=self.webroot_branch.get() or None,
+                        history_repo=self.history_repo.get() or None,
+                        history_branch=self.history_branch.get() or None,
+                        sparse_dirs=sparse_dirs,
+                        enable_sparse_checkout=self.enable_sparse_checkout.get(),
+                        progress_callback=lambda msg: self.root.after(0, lambda: self.update_progress(msg))
+                    )
+                    
+                    # Run publisher
+                    publisher.run()
+                    
+                    # Show success
+                    self.root.after(0, lambda: self.progress_label.configure(text="✅ Completed!"))
+                    self.root.after(0, lambda: messagebox.showinfo("Success", 
+                                                                  "🎉 Publication completed successfully!\n\nYour FHIR IG has been published."))
+                    
+                except Exception as e:
+                    # Show error
+                    self.root.after(0, lambda: self.progress_label.configure(text="❌ Error occurred"))
+                    self.root.after(0, lambda: self.update_progress(f"ERROR: {str(e)}"))
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"❌ An error occurred:\n\n{str(e)}"))
+            
+            # Start thread
+            thread = threading.Thread(target=run_in_thread, daemon=True)
+            thread.start()
+        
+        def run(self):
+            """Start the GUI"""
+            self.root.mainloop()
+
+def main():
+    parser = argparse.ArgumentParser(description="FHIR IG Publisher Release Utility")
+    parser.add_argument('--gui', action='store_true', help='Launch beautiful GUI interface')
+    parser.add_argument('--source', type=str, help='Path to the IG source folder')
+    parser.add_argument('--source-repo', type=str, help='URL to the IG source repository')
+    parser.add_argument('--source-branch', type=str, help='Branch name for IG source')
+    parser.add_argument('--webroot-repo', type=str, help='Webroot repo URL')
+    parser.add_argument('--webroot-branch', type=str, help='Webroot branch name')
+    parser.add_argument('--history-repo', type=str, help='History repo URL')
+    parser.add_argument('--history-branch', type=str, help='History branch name')
+    parser.add_argument('--sparse', nargs='*', help='Sparse checkout folders for webroot')
+    parser.add_argument('--enable-sparse', action='store_true', help='Enable sparse checkout')
+    args = parser.parse_args()
+
+    if args.gui:
+        if not tk:
+            print("❌ GUI not available: tkinter not found")
+            sys.exit(1)
+        gui = ModernFHIRPublisherGUI()
+        gui.run()
+    else:
+        publisher = ReleasePublisher(
+            source_dir=args.source,
+            source_repo=args.source_repo,
+            source_branch=args.source_branch,
+            webroot_repo=args.webroot_repo,
+            webroot_branch=args.webroot_branch,
+            history_repo=args.history_repo,
+            history_branch=args.history_branch,
+            sparse_dirs=args.sparse,
+            enable_sparse_checkout=args.enable_sparse
+        )
+        publisher.run()
+
+if __name__ == '__main__':
+    main()
