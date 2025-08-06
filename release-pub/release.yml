@@ -1,0 +1,69 @@
+name: ReleaseBuild
+
+on:
+  workflow_call:
+    inputs:
+      ig_folder:
+        description: 'IG folder in smart-html repo'
+        required: false
+        default: 'hiv'
+        type: string
+  workflow_dispatch:
+    inputs:
+      ig_folder:
+        description: 'IG folder in smart-html repo'
+        required: false
+        default: 'hiv'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Run IG Publisher Script
+        run: |
+          # Download the script (or use it from your repo if committed)
+          # Option 1: If script is in your repo
+          python ig_publisher.py \
+            --ig-folder ${{ inputs.ig_folder }} \
+            --work-dir . \
+            --github-token ${{ secrets.GITHUB_TOKEN }} \
+            --push \
+            --debug
+          
+          # Option 2: Download script from a URL or another repo
+          # curl -O https://raw.githubusercontent.com/your-org/your-repo/main/ig_publisher.py
+          # python ig_publisher.py --ig-folder ${{ inputs.ig_folder }}
+      
+      - name: Deploy to GitHub Pages
+        if: success()
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          destination_dir: sitepreview
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            release-assets/
+            ig-registry/fhir-ig-list.json
+            ig-registry/package-feeds.json
