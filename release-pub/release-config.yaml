@@ -1,0 +1,9 @@
+source_repo: https://github.com/WorldHealthOrganization/smart-dak-pnc
+source_branch: v0.9.9_releaseCandidate
+history_repo: https://github.com/HL7/fhir-ig-history-template
+history_branch: main
+webroot_repo: https://github.com/WorldHealthOrganization/smart-html
+webroot_branch: main
+sparse_dirs:
+  - templates
+  - assets
