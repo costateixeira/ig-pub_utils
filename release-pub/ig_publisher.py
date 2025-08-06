@@ -585,6 +585,7 @@ if tk:
             canvas.pack(side="left", fill="both", expand=True)
 
             scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+            scrollable_frame.pack_propagate(False)
 
             window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
@@ -594,7 +595,7 @@ if tk:
 
             # Optional: match width of scrollable frame to canvas
             def resize_scrollable(event):
-                canvas.itemconfig(window_id, width=event.width)
+                canvas.itemconfig(window_id, width=event.width, height=event.height)
             canvas.bind("<Configure>", resize_scrollable)
 
             # Mouse wheel scroll
@@ -703,6 +704,7 @@ if tk:
                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
             title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
 
+
             self.create_field(scrollable_frame, "History Repository URL",
                             "Repository containing the IG history template for version management",
                             self.history_repo, "📚")
@@ -720,6 +722,9 @@ if tk:
                             self.webroot_branch, "🌳")
 
         
+            spacer = tk.Frame(scrollable_frame, height=1, bg=colors['bg_secondary'])
+            spacer.pack(fill='both', expand=True)
+
         def create_advanced_tab(self, parent):
             """Create advanced options tab"""
             colors = self.get_current_colors()
