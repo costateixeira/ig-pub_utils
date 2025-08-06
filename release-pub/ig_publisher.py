@@ -170,8 +170,13 @@ if tk:
         def __init__(self):
             self.root = tk.Tk()
             self.root.title("FHIR IG Publisher")
+            
+            # Enable high DPI support FIRST, before any other setup
+            self.setup_high_dpi_support()
+            
+            # Much bigger default window size
             self.root.geometry("1200x900")
-            self.root.minsize(900, 700)
+            self.root.minsize(1200, 900)
             
             # Initialize theme
             self.is_dark_theme = False
@@ -191,6 +196,63 @@ if tk:
             
             # Apply initial theme
             self.apply_theme()
+        
+        def setup_high_dpi_support(self):
+            """Enable high DPI support for crisp rendering on high resolution screens"""
+            try:
+                # Try to enable DPI awareness on Windows
+                import ctypes
+                
+                # Tell Windows this app is DPI aware
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Per-monitor DPI aware
+                except:
+                    try:
+                        ctypes.windll.user32.SetProcessDPIAware()  # System DPI aware (fallback)
+                    except:
+                        pass
+                
+                # Get system DPI scaling
+                try:
+                    # Get DPI of primary monitor
+                    hdc = ctypes.windll.user32.GetDC(0)
+                    dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+                    ctypes.windll.user32.ReleaseDC(0, hdc)
+                    
+                    # Calculate scale factor (96 DPI is 100% scaling)
+                    scale_factor = dpi_x / 96.0
+                    
+                    # Apply scaling to tkinter
+                    self.root.tk.call('tk', 'scaling', scale_factor)
+                    
+                    # Store scale factor for font sizing
+                    self.dpi_scale = scale_factor
+                    print(f"High DPI support enabled: {dpi_x} DPI, scale factor: {scale_factor:.2f}")
+                    
+                except:
+                    # Fallback: detect from tkinter
+                    dpi = self.root.winfo_fpixels('1i')
+                    scale_factor = dpi / 72.0  # 72 is default tkinter DPI
+                    self.root.tk.call('tk', 'scaling', scale_factor)
+                    self.dpi_scale = scale_factor
+                    print(f"High DPI support enabled (fallback): {dpi:.1f} DPI, scale factor: {scale_factor:.2f}")
+                    
+            except ImportError:
+                # Non-Windows or no ctypes available
+                try:
+                    # Try to get DPI info from tkinter
+                    dpi = self.root.winfo_fpixels('1i')
+                    if dpi > 96:  # If higher than standard DPI
+                        scale_factor = dpi / 96.0
+                        self.root.tk.call('tk', 'scaling', scale_factor)
+                        self.dpi_scale = scale_factor
+                        print(f"High DPI support enabled (cross-platform): {dpi:.1f} DPI, scale factor: {scale_factor:.2f}")
+                    else:
+                        self.dpi_scale = 1.0
+                        print("Standard DPI detected, no scaling applied")
+                except:
+                    self.dpi_scale = 1.0
+                    print("Using default DPI scaling")
             
         def setup_colors(self):
             """Define color schemes for light and dark themes"""
@@ -216,7 +278,7 @@ if tk:
                     'bg_secondary': '#2D3748',
                     'bg_accent': '#4A5568',
                     'text_primary': '#F7FAFC',
-                    'text_secondary': '#E2E8F0',
+                    'text_secondary': '#727880',
                     'text_muted': '#A0AEC0',
                     'accent': '#90CDF4',
                     'accent_hover': '#63B3ED',
@@ -230,28 +292,51 @@ if tk:
             }
         
         def setup_fonts(self):
-            """Setup custom fonts"""
+            """Setup custom fonts with conservative DPI scaling for crisp rendering"""
             try:
+                # Much more conservative scaling - only scale moderately for very high DPI
+                if hasattr(self, 'dpi_scale') and self.dpi_scale > 1.5:
+                    # Only apply scaling for very high DPI displays, and keep it modest
+                    base_scale = 1.0 + ((self.dpi_scale - 1.0) * 0.3)  # Much more conservative
+                else:
+                    base_scale = 1.0  # No scaling for normal displays
+                
+                # Ensure we don't go crazy with scaling
+                base_scale = min(base_scale, 1.4)  # Cap at 40% increase maximum
+                
                 self.fonts = {
-                    'heading': tkfont.Font(family="Segoe UI", size=24, weight="bold"),
-                    'subheading': tkfont.Font(family="Segoe UI", size=16, weight="bold"),
-                    'body': tkfont.Font(family="Segoe UI", size=10),
-                    'body_bold': tkfont.Font(family="Segoe UI", size=10, weight="bold"),
-                    'small': tkfont.Font(family="Segoe UI", size=9),
-                    'button': tkfont.Font(family="Segoe UI", size=10, weight="bold"),
-                    'code': tkfont.Font(family="Consolas", size=9)
+                    'heading': tkfont.Font(family="Segoe UI", size=int(20 * base_scale), weight="bold"),
+                    'subheading': tkfont.Font(family="Segoe UI", size=int(14 * base_scale), weight="bold"),
+                    'body': tkfont.Font(family="Segoe UI", size=int(10 * base_scale)),
+                    'body_bold': tkfont.Font(family="Segoe UI", size=int(10 * base_scale), weight="bold"),
+                    'small': tkfont.Font(family="Segoe UI", size=int(9 * base_scale)),
+                    'button': tkfont.Font(family="Segoe UI", size=int(10 * base_scale), weight="bold"),
+                    'button_large': tkfont.Font(family="Segoe UI", size=int(11 * base_scale), weight="bold"),
+                    'code': tkfont.Font(family="Consolas", size=int(9 * base_scale))
                 }
+                
+                # Conservative icon sizing
+                self.icon_size = int(20 * base_scale)
+                
+                # Store conservative scale for UI elements
+                self.ui_scale = base_scale
+                
+                print(f"Conservative scaling applied: {base_scale:.2f}x (from DPI scale {getattr(self, 'dpi_scale', 1.0):.2f})")
+                
             except:
-                # Fallback fonts
+                # Fallback fonts - normal sizes
                 self.fonts = {
-                    'heading': tkfont.Font(size=18, weight="bold"),
-                    'subheading': tkfont.Font(size=12, weight="bold"),
+                    'heading': tkfont.Font(size=20, weight="bold"),
+                    'subheading': tkfont.Font(size=14, weight="bold"),
                     'body': tkfont.Font(size=10),
                     'body_bold': tkfont.Font(size=10, weight="bold"),
                     'small': tkfont.Font(size=9),
                     'button': tkfont.Font(size=10, weight="bold"),
+                    'button_large': tkfont.Font(size=11, weight="bold"),
                     'code': tkfont.Font(family="Courier", size=9)
                 }
+                self.icon_size = 20
+                self.ui_scale = 1.0
         
         def setup_styles(self):
             """Setup ttk styles"""
@@ -386,7 +471,8 @@ if tk:
             title_container.pack(anchor=tk.W)
             
             # Icon
-            icon_label = tk.Label(title_container, text="🧬", font=('Segoe UI', 24),
+            icon_label = tk.Label(title_container, text="🧬", 
+                                font=('Segoe UI', self.icon_size),
                                 bg=colors['bg_secondary'])
             icon_label.pack(side=tk.LEFT, padx=(0, 10))
             
@@ -396,7 +482,7 @@ if tk:
             
             # Title
             title_label = tk.Label(text_container, text="FHIR IG Publisher", 
-                                 font=tkfont.Font(family="Segoe UI", size=16, weight="bold"),
+                                 font=self.fonts['subheading'],
                                  bg=colors['bg_secondary'], 
                                  fg=colors['accent'])
             title_label.pack(anchor=tk.W)
@@ -404,50 +490,58 @@ if tk:
             # Subtitle
             subtitle_label = tk.Label(text_container, 
                                     text="Configure and publish FHIR Implementation Guides",
-                                    font=tkfont.Font(family="Segoe UI", size=9),
+                                    font=self.fonts['small'],
                                     bg=colors['bg_secondary'], 
                                     fg=colors['text_muted'])
             subtitle_label.pack(anchor=tk.W)
             
             # Right side - Theme toggle button (aligned with title)
+            theme_font_size = int(12 * getattr(self, 'ui_scale', 1.0))
+            theme_padding = max(6, int(8 * getattr(self, 'ui_scale', 1.0)))
+            
             self.theme_button = tk.Button(title_frame, text="🌙", 
                                         command=self.toggle_theme,
-                                        font=('Segoe UI', 12), 
+                                        font=('Segoe UI', theme_font_size), 
                                         relief=tk.FLAT,
                                         bg=colors['bg_accent'],
                                         fg=colors['text_primary'],
-                                        padx=8, pady=4)
+                                        padx=theme_padding, 
+                                        pady=theme_padding//2)
             self.theme_button.pack(side=tk.RIGHT, anchor=tk.E)
         
         def create_notebook(self, parent):
-            """Create the compact tabbed notebook interface"""
+            """Create the tabbed notebook interface with proper space distribution"""
             colors = self.get_current_colors()
             
-            # Notebook with LIMITED height - this is the key fix!
-            self.notebook = ttk.Notebook(parent, style='Modern.TNotebook', height=400)
-            self.notebook.pack(fill=tk.X, pady=(0, 10))  # Only fill X, not BOTH, no expand
+            # Create a frame for the notebook that can expand properly
+            notebook_frame = tk.Frame(parent, bg=colors['bg_primary'])
+            notebook_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
             
-            # Source tab - more compact
-            source_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            # Notebook without fixed height - let it expand naturally
+            self.notebook = ttk.Notebook(notebook_frame, style='Modern.TNotebook')
+            self.notebook.pack(fill=tk.BOTH, expand=True)
+            
+            # Source tab with better spacing
+            source_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'])
             self.notebook.add(source_frame, text="📂  Source Configuration")
             self.create_source_tab(source_frame)
             
-            # Repository tab - more compact
-            repo_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            # Repository tab with better spacing
+            repo_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'])
             self.notebook.add(repo_frame, text="🔗  Repository Settings")
             self.create_repository_tab(repo_frame)
             
-            # Advanced tab - more compact
-            advanced_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'], padx=20, pady=15)
+            # Advanced tab with better spacing
+            advanced_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'])
             self.notebook.add(advanced_frame, text="⚡  Advanced Options")
             self.create_advanced_tab(advanced_frame)
         
         def create_field(self, parent, label_text, description, variable, icon=""):
-            """Create a compact modern field with label, description, and entry"""
+            """Create a well-spaced modern field with label, description, and entry"""
             colors = self.get_current_colors()
             
             field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
-            field_frame.pack(fill=tk.X, pady=8)  # Reduced from 15
+            field_frame.pack(fill=tk.X, pady=15, padx=20)  # Much better spacing
             
             # Label with icon
             label_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
@@ -458,13 +552,13 @@ if tk:
                            bg=colors['bg_secondary'], fg=colors['text_primary'])
             label.pack(anchor=tk.W)
             
-            # Description
+            # Description with better spacing
             desc_label = tk.Label(field_frame, text=description,
                                 font=self.fonts['small'], 
                                 bg=colors['bg_secondary'], fg=colors['text_muted'])
-            desc_label.pack(anchor=tk.W, pady=(1, 5))  # Reduced padding
+            desc_label.pack(anchor=tk.W, pady=(3, 10))  # Better spacing
             
-            # Entry field
+            # Entry field with better height
             entry = tk.Entry(field_frame, textvariable=variable, 
                            font=self.fonts['body'],
                            bg=colors['bg_primary'], fg=colors['text_primary'],
@@ -472,38 +566,60 @@ if tk:
                            relief=tk.FLAT, bd=0, highlightthickness=2,
                            highlightcolor=colors['accent'],
                            highlightbackground=colors['border'])
-            entry.pack(fill=tk.X, ipady=6)  # Reduced from 8
+            entry.pack(fill=tk.X, ipady=8)  # Better height
             
             return entry
         
         def create_source_tab(self, parent):
-            """Create source configuration tab"""
+            """Create source configuration tab with proper spacing"""
             colors = self.get_current_colors()
             
-            # Compact section title
-            title_label = tk.Label(parent, text="Source Configuration",
+            # Create a scrollable frame for the content
+            canvas = tk.Canvas(parent, bg=colors['bg_secondary'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+            
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            # Enable mouse wheel scrolling
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+            # Pack the canvas and scrollbar
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            
+            # Section title with better spacing
+            title_label = tk.Label(scrollable_frame, text="Source Configuration",
                                  font=self.fonts['subheading'],
                                  bg=colors['bg_secondary'], fg=colors['text_primary'])
-            title_label.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
             
-            # Fields
-            self.create_field(parent, "Source Repository URL", 
+            # Fields with better spacing
+            self.create_field(scrollable_frame, "Source Repository URL", 
                             "Git repository containing your FHIR IG source files",
                             self.source_repo, "🌐")
             
-            self.create_field(parent, "Source Branch", 
+            self.create_field(scrollable_frame, "Source Branch", 
                             "Specific branch or tag to use from the source repository",
                             self.source_branch, "🔀")
             
             # Local directory with browse button
-            self.create_directory_field(parent)
+            self.create_directory_field(scrollable_frame)
         
         def create_directory_field(self, parent):
-            """Create compact directory field with browse button"""
+            """Create directory field with browse button and proper spacing"""
             colors = self.get_current_colors()
             
             field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
-            field_frame.pack(fill=tk.X, pady=8)  # Reduced padding
+            field_frame.pack(fill=tk.X, pady=15, padx=20)  # Better spacing
             
             # Label
             label = tk.Label(field_frame, text="📁 Local Source Directory (Optional)",
@@ -511,17 +627,17 @@ if tk:
                            bg=colors['bg_secondary'], fg=colors['text_primary'])
             label.pack(anchor=tk.W)
             
-            # Description
+            # Description with better spacing
             desc_label = tk.Label(field_frame, text="Use existing local directory instead of cloning from repository",
                                 font=self.fonts['small'], 
                                 bg=colors['bg_secondary'], fg=colors['text_muted'])
-            desc_label.pack(anchor=tk.W, pady=(1, 5))  # Reduced padding
+            desc_label.pack(anchor=tk.W, pady=(3, 10))  # Better spacing
             
             # Entry and button frame
             entry_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
             entry_frame.pack(fill=tk.X)
             
-            # Entry
+            # Entry with better height
             self.source_dir_entry = tk.Entry(entry_frame, textvariable=self.source_dir,
                                            font=self.fonts['body'],
                                            bg=colors['bg_primary'], fg=colors['text_primary'],
@@ -529,38 +645,58 @@ if tk:
                                            relief=tk.FLAT, bd=0, highlightthickness=2,
                                            highlightcolor=colors['accent'],
                                            highlightbackground=colors['border'])
-            self.source_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)  # Reduced padding
+            self.source_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, 
+                                     ipady=8)  # Better height
             
             # Browse button
             browse_btn = tk.Button(entry_frame, text="🔍 Browse", 
                                  command=self.browse_source_directory,
                                  font=self.fonts['button'],
                                  bg=colors['bg_accent'], fg=colors['text_primary'],
-                                 relief=tk.FLAT, padx=15, pady=6)  # Reduced padding
-            browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
+                                 relief=tk.FLAT, 
+                                 padx=15, pady=8)  # Better padding
+            browse_btn.pack(side=tk.RIGHT, padx=(15, 0))  # Better spacing
         
         def create_repository_tab(self, parent):
-            """Create repository configuration tab"""
+            """Create repository configuration tab with proper spacing"""
             colors = self.get_current_colors()
             
-            title_label = tk.Label(parent, text="Repository Configuration",
+            # Create a scrollable frame for the content
+            canvas = tk.Canvas(parent, bg=colors['bg_secondary'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+            
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            # Pack the canvas and scrollbar
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            
+            # Section title with better spacing
+            title_label = tk.Label(scrollable_frame, text="Repository Configuration",
                                  font=self.fonts['subheading'],
                                  bg=colors['bg_secondary'], fg=colors['text_primary'])
-            title_label.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
             
-            self.create_field(parent, "History Repository URL",
+            self.create_field(scrollable_frame, "History Repository URL",
                             "Repository containing the IG history template for version management",
                             self.history_repo, "📚")
             
-            self.create_field(parent, "History Branch",
+            self.create_field(scrollable_frame, "History Branch",
                             "Branch to use from the history repository",
                             self.history_branch, "🌿")
             
-            self.create_field(parent, "Webroot Repository URL",
+            self.create_field(scrollable_frame, "Webroot Repository URL",
                             "Repository containing web publishing templates and assets",
                             self.webroot_repo, "🌍")
             
-            self.create_field(parent, "Webroot Branch",
+            self.create_field(scrollable_frame, "Webroot Branch",
                             "Branch to use from the webroot repository", 
                             self.webroot_branch, "🌳")
         
@@ -625,7 +761,7 @@ if tk:
                                        relief=tk.FLAT, bd=0, highlightthickness=2,
                                        highlightcolor=colors['accent'],
                                        highlightbackground=colors['border'])
-            self.sparse_entry.pack(fill=tk.X, ipady=6)  # Reduced padding
+            self.sparse_entry.pack(fill=tk.X, ipady=5)  # Reasonable padding
             
             # Example - more compact
             example_frame = tk.Frame(self.sparse_dir_frame, bg=colors['bg_accent'])
@@ -645,46 +781,48 @@ if tk:
             self.toggle_sparse_fields()
         
         def create_action_buttons(self, parent):
-            """Create prominent action buttons - ALWAYS visible"""
+            """Create prominent action buttons with proper spacing"""
             colors = self.get_current_colors()
             
-            # Make button frame more prominent with a border - FORCE it to be visible
+            # Make button frame more prominent with proper spacing
             button_frame = tk.Frame(parent, bg=colors['button_bg'], relief=tk.RAISED, bd=3)
-            button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)  # Force to bottom
+            button_frame.pack(fill=tk.X, pady=15, padx=5)  # Normal packing, not forced to bottom
             
             # Add some padding inside the frame
             button_inner = tk.Frame(button_frame, bg=colors['button_bg'])
-            button_inner.pack(fill=tk.X, padx=20, pady=15)
+            button_inner.pack(fill=tk.X, padx=25, pady=20)  # Better padding
             
             # Create a centered container for buttons
             button_container = tk.Frame(button_inner, bg=colors['button_bg'])
             button_container.pack(anchor=tk.CENTER)
             
-            # Save button
+            # Save button with better sizing
             save_btn = tk.Button(button_container, text="💾 SAVE CONFIG",
                                command=self.save_configuration,
-                               font=tkfont.Font(family="Segoe UI", size=11, weight="bold"),
+                               font=self.fonts['button'],
                                bg='#FF9800', fg='white',
-                               relief=tk.RAISED, bd=2, padx=20, pady=12,
+                               relief=tk.RAISED, bd=2, 
+                               padx=20, pady=12,  # Good padding
                                cursor='hand2')
-            save_btn.pack(side=tk.LEFT, padx=(0, 20))
+            save_btn.pack(side=tk.LEFT, padx=(0, 20))  # Better spacing
             
-            # Run button - made very prominent
+            # Run button with better sizing
             self.run_btn = tk.Button(button_container, text="🚀 RUN PUBLISHER",
                                    command=self.run_publisher_threaded,
-                                   font=tkfont.Font(family="Segoe UI", size=12, weight="bold"),
+                                   font=self.fonts['button_large'],
                                    bg='#4CAF50', fg='white',
-                                   relief=tk.RAISED, bd=4, padx=20, pady=12,
+                                   relief=tk.RAISED, bd=3, 
+                                   padx=30, pady=15,  # Good padding
                                    cursor='hand2',
                                    activebackground='#45a049')
             self.run_btn.is_primary = True
             self.run_btn.pack(side=tk.LEFT)
             
-            # Add a label to make it super obvious
+            # Add a label with better spacing
             info_label = tk.Label(button_inner, text="👆 Click RUN PUBLISHER to start processing",
-                                font=tkfont.Font(family="Segoe UI", size=9),
+                                font=self.fonts['small'],
                                 bg=colors['button_bg'], fg='white')
-            info_label.pack(pady=(10, 0))
+            info_label.pack(pady=(15, 0))  # Better spacing
         
         def create_progress_section(self, parent):
             """Create progress section"""
