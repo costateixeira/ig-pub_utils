@@ -1,9 +1,15 @@
-source_repo: https://github.com/WorldHealthOrganization/smart-dak-pnc
-source_branch: v0.9.9_releaseCandidate
-history_repo: https://github.com/HL7/fhir-ig-history-template
+enable_pr_creation: true
+enable_sparse_checkout: false
+github_token: ''
 history_branch: main
-webroot_repo: https://github.com/WorldHealthOrganization/smart-html
-webroot_branch: main
+history_repo: https://github.com/HL7/fhir-ig-history-template
+registry_pr_target_branch: master
+source_branch: v0.9.9_releaseCandidate
+source_dir: ''
+source_repo: https://github.com/WorldHealthOrganization/smart-dak-pnc
 sparse_dirs:
-  - templates
-  - assets
+- templates
+- assets
+webroot_branch: main
+webroot_pr_target_branch: main
+webroot_repo: https://github.com/WorldHealthOrganization/smart-html

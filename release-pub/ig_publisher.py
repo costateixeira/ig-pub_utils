@@ -59,11 +59,30 @@ class ReleasePublisher:
         self.enable_sparse_checkout = enable_sparse_checkout
         self.progress_callback = progress_callback
         
-        # GitHub PR settings
-        self.github_token = github_token
+        # GitHub PR settings - auto-detect GitHub Actions environment
+        self.github_token = github_token or self.get_github_token()
         self.enable_pr_creation = enable_pr_creation
         self.webroot_pr_target_branch = webroot_pr_target_branch
         self.registry_pr_target_branch = registry_pr_target_branch
+        
+        # Check if running in GitHub Actions
+        self.is_github_actions = os.environ.get('GITHUB_ACTIONS') == 'true'
+
+    def get_github_token(self):
+        """Get GitHub token from environment (GitHub Actions or manual)"""
+        # First check for GITHUB_TOKEN (GitHub Actions default)
+        token = os.environ.get('GITHUB_TOKEN')
+        if token:
+            self.log_progress("Using GITHUB_TOKEN from environment")
+            return token
+        
+        # Check for custom PAT environment variable
+        token = os.environ.get('GH_PAT')
+        if token:
+            self.log_progress("Using GH_PAT from environment")
+            return token
+        
+        return None
 
     def log_progress(self, message):
         logging.info(message)
@@ -164,11 +183,21 @@ class ReleasePublisher:
     def create_github_pr(self, repo_url, head_branch, base_branch, title, body):
         """Create a GitHub pull request using the GitHub API"""
         if not self.github_token:
-            self.log_progress("❌ GitHub token not provided, cannot create PR")
+            if self.is_github_actions:
+                self.log_progress("⚠️ No GitHub token available in GitHub Actions. Ensure GITHUB_TOKEN is properly configured.")
+            else:
+                self.log_progress("❌ GitHub token not provided, cannot create PR")
             return False
             
         try:
             owner, repo_name = self.get_repo_info_from_url(repo_url)
+            
+            # Check if this is the same repo we're running in (for GitHub Actions)
+            current_repo = os.environ.get('GITHUB_REPOSITORY', '')
+            is_same_repo = current_repo == f"{owner}/{repo_name}"
+            
+            if self.is_github_actions and is_same_repo:
+                self.log_progress(f"📝 Creating PR in same repository ({current_repo}) using GITHUB_TOKEN")
             
             # GitHub API endpoint
             api_url = f"https://api.github.com/repos/{owner}/{repo_name}/pulls"
@@ -182,8 +211,10 @@ class ReleasePublisher:
             }
             
             # Headers with authentication
+            # Use Bearer format for GitHub Actions token
+            auth_header = f"Bearer {self.github_token}" if self.is_github_actions else f"token {self.github_token}"
             headers = {
-                "Authorization": f"token {self.github_token}",
+                "Authorization": auth_header,
                 "Accept": "application/vnd.github.v3+json",
                 "Content-Type": "application/json"
             }
@@ -235,6 +266,7 @@ This PR contains updated content from the FHIR IG publishing process.
 
 **Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 **Source:** {self.source_repo if self.source_repo else 'Local build'}
+**Automated:** {'Yes - GitHub Actions' if self.is_github_actions else 'No - Manual run'}
 """
                 
                 self.create_github_pr(
@@ -261,6 +293,7 @@ This PR updates the FHIR Implementation Guide registry with latest information.
 
 **Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 **Source:** {self.source_repo if self.source_repo else 'Local build'}
+**Automated:** {'Yes - GitHub Actions' if self.is_github_actions else 'No - Manual run'}
 """
                 
                 self.create_github_pr(
@@ -275,6 +308,9 @@ This PR updates the FHIR Implementation Guide registry with latest information.
 
     def prepare(self):
         self.log_progress("🔄 Preparing repositories...")
+        
+        if self.is_github_actions:
+            self.log_progress("🤖 Running in GitHub Actions environment")
         
         self.clone_repo(self.history_repo, self.history_dir, self.history_branch)
         
@@ -348,6 +384,117 @@ def save_config(config):
         yaml.safe_dump(config, f, default_flow_style=False)
 
 if tk:
+    class CustomCheckbox(tk.Canvas):
+        """Custom checkbox widget that supports theming and proper sizing"""
+        def __init__(self, parent, text="", variable=None, command=None, 
+                     font=None, bg="#FFFFFF", fg="#000000", 
+                     check_color="#6C63FF", size=20):
+            super().__init__(parent, highlightthickness=0, bg=bg)
+            
+            self.variable = variable or tk.BooleanVar()
+            self.command = command
+            self.text = text
+            self.font = font
+            self.bg = bg
+            self.fg = fg
+            self.check_color = check_color
+            self.size = size
+            self.checkbox_id = None
+            self.check_id = None
+            self.text_id = None
+            
+            self.setup_widget()
+            self.bind("<Button-1>", self.toggle)
+            self.bind("<Enter>", self.on_enter)
+            self.bind("<Leave>", self.on_leave)
+            
+        def setup_widget(self):
+            """Setup the checkbox widget"""
+            # Calculate dimensions
+            padding = 5
+            box_size = self.size
+            
+            # Create checkbox square
+            self.checkbox_id = self.create_rectangle(
+                padding, padding, 
+                padding + box_size, padding + box_size,
+                outline=self.fg, width=2, fill=self.bg
+            )
+            
+            # Create checkmark (initially hidden)
+            check_padding = box_size * 0.25
+            self.check_id = self.create_line(
+                padding + check_padding, 
+                padding + box_size/2,
+                padding + box_size/2.5, 
+                padding + box_size - check_padding,
+                padding + box_size - check_padding, 
+                padding + check_padding,
+                width=3, fill=self.check_color, 
+                state='hidden'
+            )
+            
+            # Create text label
+            if self.text:
+                self.text_id = self.create_text(
+                    padding * 2 + box_size, 
+                    padding + box_size/2,
+                    text=self.text, font=self.font,
+                    fill=self.fg, anchor='w'
+                )
+                
+                # Adjust canvas size to fit content
+                bbox = self.bbox('all')
+                if bbox:
+                    self.configure(width=bbox[2] + padding, 
+                                 height=bbox[3] + padding)
+            else:
+                self.configure(width=box_size + padding * 2,
+                             height=box_size + padding * 2)
+            
+            # Update visual state
+            self.update_visual()
+            
+        def toggle(self, event=None):
+            """Toggle checkbox state"""
+            self.variable.set(not self.variable.get())
+            self.update_visual()
+            if self.command:
+                self.command()
+                
+        def update_visual(self):
+            """Update checkbox visual state"""
+            if self.variable.get():
+                self.itemconfig(self.check_id, state='normal')
+                self.itemconfig(self.checkbox_id, fill=self.bg)
+            else:
+                self.itemconfig(self.check_id, state='hidden')
+                self.itemconfig(self.checkbox_id, fill=self.bg)
+                
+        def on_enter(self, event):
+            """Mouse enter effect"""
+            self.configure(cursor='hand2')
+            # Subtle highlight effect
+            if not self.variable.get():
+                self.itemconfig(self.checkbox_id, fill='#F0F0F0' if self.bg == '#FFFFFF' else '#3A4356')
+            
+        def on_leave(self, event):
+            """Mouse leave effect"""
+            self.configure(cursor='')
+            self.update_visual()
+            
+        def update_colors(self, bg, fg, check_color):
+            """Update colors for theme changes"""
+            self.bg = bg
+            self.fg = fg
+            self.check_color = check_color
+            self.configure(bg=bg)
+            self.itemconfig(self.checkbox_id, outline=fg, fill=bg)
+            self.itemconfig(self.check_id, fill=check_color)
+            if self.text_id:
+                self.itemconfig(self.text_id, fill=fg)
+            self.update_visual()
+
     class ModernFHIRPublisherGUI:
         def __init__(self):
             self.root = tk.Tk()
@@ -369,6 +516,9 @@ if tk:
             # Load configuration
             config = load_config()
             self.setup_variables(config)
+            
+            # Store custom checkboxes for theme updates
+            self.custom_checkboxes = []
             
             # Create the interface
             self.create_interface()
@@ -453,14 +603,15 @@ if tk:
                     'error': '#E53E3E',
                     'border': '#E2E8F0',
                     'button_bg': '#6C63FF',
-                    'button_hover': '#5A52D5'
+                    'button_hover': '#5A52D5',
+                    'checkbox_check': '#6C63FF'
                 },
                 'dark': {
                     'bg_primary': '#1A202C',
                     'bg_secondary': '#2D3748',
                     'bg_accent': '#4A5568',
                     'text_primary': '#F7FAFC',
-                    'text_secondary': '#727880',
+                    'text_secondary': '#E2E8F0',
                     'text_muted': '#A0AEC0',
                     'accent': '#90CDF4',
                     'accent_hover': '#63B3ED',
@@ -469,7 +620,8 @@ if tk:
                     'error': '#FC8181',
                     'border': '#4A5568',
                     'button_bg': '#4299E1',
-                    'button_hover': '#3182CE'
+                    'button_hover': '#3182CE',
+                    'checkbox_check': '#90CDF4'
                 }
             }
         
@@ -500,6 +652,9 @@ if tk:
                 # Conservative icon sizing
                 self.icon_size = int(20 * base_scale)
                 
+                # Checkbox size
+                self.checkbox_size = int(20 * base_scale)
+                
                 # Store conservative scale for UI elements
                 self.ui_scale = base_scale
                 
@@ -518,6 +673,7 @@ if tk:
                     'code': tkfont.Font(family="Courier", size=9)
                 }
                 self.icon_size = 20
+                self.checkbox_size = 20
                 self.ui_scale = 1.0
         
         def setup_styles(self):
@@ -529,17 +685,6 @@ if tk:
             self.style.configure('Modern.TNotebook.Tab', 
                                padding=[20, 12], 
                                font=self.fonts['body_bold'])
-            
-            # Fix checkbox sizing for high DPI
-            checkbox_size = max(16, int(16 * getattr(self, 'ui_scale', 1.0)))
-            self.style.configure('Modern.TCheckbutton',
-                               font=self.fonts['body_bold'],
-                               focuscolor='none')
-            
-            # Configure checkbox indicator size
-            self.style.configure('Modern.TCheckbutton.indicator', 
-                               width=checkbox_size, 
-                               height=checkbox_size)
             
         def get_current_colors(self):
             """Get current theme colors"""
@@ -563,6 +708,10 @@ if tk:
                           background=[('selected', colors['bg_secondary'])],
                           foreground=[('selected', colors['accent'])])
             
+            # Update custom checkboxes
+            for checkbox in self.custom_checkboxes:
+                checkbox.update_colors(colors['bg_accent'], colors['text_primary'], colors['checkbox_check'])
+            
             # Update all frames
             for widget in self.root.winfo_children():
                 self.update_widget_colors(widget, colors)
@@ -585,9 +734,6 @@ if tk:
                 else:
                     widget.configure(bg=colors['bg_accent'], fg=colors['text_primary'],
                                    activebackground=colors['border'])
-            elif widget_class == 'Checkbutton':
-                widget.configure(bg=colors['bg_secondary'], fg=colors['text_primary'],
-                               activebackground=colors['bg_secondary'])
             elif widget_class == 'Text':
                 widget.configure(bg=colors['bg_primary'], fg=colors['text_primary'],
                                insertbackground=colors['text_primary'])
@@ -643,7 +789,6 @@ if tk:
                 y = 0
                 
             self.root.geometry(f'{width}x{height}+{x}+{y}')
-
 
         def create_interface(self):
             """Create the main interface"""
@@ -976,7 +1121,7 @@ if tk:
             spacer.pack(fill='both', expand=True)
 
         def create_advanced_tab(self, parent):
-            """Create advanced options tab"""
+            """Create advanced options tab with custom checkbox"""
             colors = self.get_current_colors()
             
             title_label = tk.Label(parent, text="Advanced Configuration",
@@ -1004,13 +1149,20 @@ if tk:
                                  bg=colors['bg_accent'], fg=colors['text_muted'])
             sparse_desc.pack(anchor=tk.W, pady=(1, 10))  # Reduced padding
             
-            # Checkbox
-            self.sparse_checkbox = ttk.Checkbutton(sparse_content, 
-                                                text="Enable sparse checkout for webroot repository",
-                                                variable=self.enable_sparse_checkout,
-                                                style='Modern.TCheckbutton',
-                                                command=self.toggle_sparse_fields)
-            self.sparse_checkbox.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
+            # Custom checkbox
+            self.sparse_checkbox = CustomCheckbox(
+                sparse_content,
+                text="Enable sparse checkout for webroot repository",
+                variable=self.enable_sparse_checkout,
+                command=self.toggle_sparse_fields,
+                font=self.fonts['body_bold'],
+                bg=colors['bg_accent'],
+                fg=colors['text_primary'],
+                check_color=colors['checkbox_check'],
+                size=self.checkbox_size
+            )
+            self.sparse_checkbox.pack(anchor=tk.W, pady=(0, 10))
+            self.custom_checkboxes.append(self.sparse_checkbox)
             
             # Sparse directories field
             self.sparse_dir_frame = tk.Frame(sparse_content, bg=colors['bg_accent'])
@@ -1054,7 +1206,7 @@ if tk:
             self.toggle_sparse_fields()
 
         def create_github_tab(self, parent):
-            """Create GitHub PR configuration tab"""
+            """Create GitHub PR configuration tab with custom checkbox"""
             colors = self.get_current_colors()
 
             # Container for canvas + scrollbar
@@ -1109,25 +1261,28 @@ if tk:
                              bg=colors['bg_accent'], fg=colors['text_muted'])
             pr_desc.pack(anchor=tk.W, pady=(5, 15))
 
-            # Enable PR checkbox
-            self.pr_checkbox = tk.Checkbutton(pr_content, 
-                                            text="Enable automatic PR creation",
-                                            variable=self.enable_pr_creation,
-                                            # font=self.fonts['body_bold'],
-                                            style='Modern.TCheckbutton',
-                                            # bg=colors['bg_accent'], fg=colors['text_primary'],
-                                            # activebackground=colors['bg_accent'],
-                                            command=self.toggle_pr_fields)
-                                            
+            # Custom checkbox for PR
+            self.pr_checkbox = CustomCheckbox(
+                pr_content,
+                text="Enable automatic PR creation",
+                variable=self.enable_pr_creation,
+                command=self.toggle_pr_fields,
+                font=self.fonts['body_bold'],
+                bg=colors['bg_accent'],
+                fg=colors['text_primary'],
+                check_color=colors['checkbox_check'],
+                size=self.checkbox_size
+            )
             self.pr_checkbox.pack(anchor=tk.W, pady=(0, 15))
+            self.custom_checkboxes.append(self.pr_checkbox)
 
             # PR fields frame
             self.pr_fields_frame = tk.Frame(pr_content, bg=colors['bg_accent'])
             self.pr_fields_frame.pack(fill=tk.X)
 
-            # Create PR configuration fields inside this frame
-            self.create_password_field(scrollable_frame, "GitHub Personal Access Token",
-                                     "Required for creating pull requests. Generate at: Settings > Developer settings > Personal access tokens",
+            # Create PR configuration fields
+            self.create_password_field(scrollable_frame, "GitHub Personal Access Token (Optional)",
+                                     "Token for external repos. GitHub Actions provides automatic auth for same repo",
                                      self.github_token, "🔑")
 
             self.create_field(scrollable_frame, "Webroot PR Target Branch",
@@ -1138,24 +1293,27 @@ if tk:
                             "Target branch for IG registry pull requests",
                             self.registry_pr_target_branch, "🎯")
 
-            # GitHub token help
+            # GitHub token help with updated info
             help_frame = tk.Frame(scrollable_frame, bg=colors['bg_accent'], relief=tk.FLAT, bd=1)
             help_frame.pack(fill=tk.X, pady=15, padx=20)
             
             help_content = tk.Frame(help_frame, bg=colors['bg_accent'])
             help_content.pack(fill=tk.BOTH, padx=20, pady=15)
             
-            help_title = tk.Label(help_content, text="ℹ️ GitHub Token Setup",
+            help_title = tk.Label(help_content, text="ℹ️ GitHub Authentication",
                                 font=self.fonts['body_bold'],
                                 bg=colors['bg_accent'], fg=colors['warning'])
             help_title.pack(anchor=tk.W)
             
             help_text = tk.Label(help_content,
-                               text="""1. Go to GitHub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)
-2. Click 'Generate new token (classic)'
-3. Select scopes: 'repo' (full control of private repositories)
-4. Copy the token and paste it above
-5. Keep the token secure - it won't be shown again!""",
+                               text="""GitHub Actions:
+• No token needed for same repository - uses GITHUB_TOKEN automatically
+• For external repos, add PAT as secret: Settings → Secrets → Actions → New secret
+
+Manual/Local runs:
+1. Go to GitHub.com → Settings → Developer settings → Personal access tokens
+2. Generate new token with 'repo' scope
+3. Paste token above or set as GH_PAT environment variable""",
                                font=self.fonts['small'],
                                bg=colors['bg_accent'], fg=colors['text_muted'],
                                justify=tk.LEFT)
@@ -1364,6 +1522,11 @@ def main():
     parser.add_argument('--webroot-pr-target', type=str, default='main', help='Webroot PR target branch')
     parser.add_argument('--registry-pr-target', type=str, default='master', help='Registry PR target branch')
     args = parser.parse_args()
+
+    # Check for GitHub Actions environment
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        print("🤖 Running in GitHub Actions environment")
+        # Token will be auto-detected from GITHUB_TOKEN environment variable
 
     if args.gui:
         if not tk:
