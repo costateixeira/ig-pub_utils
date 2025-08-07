@@ -1,7 +1,7 @@
 enable_pr_creation: true
 enable_sparse_checkout: false
 github_token: ''
-history_branch: main
+history_branch: master
 history_repo: https://github.com/HL7/fhir-ig-history-template
 registry_pr_target_branch: master
 source_branch: v0.9.9_releaseCandidate
