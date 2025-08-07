@@ -530,6 +530,17 @@ if tk:
                                padding=[20, 12], 
                                font=self.fonts['body_bold'])
             
+            # Fix checkbox sizing for high DPI
+            checkbox_size = max(16, int(16 * getattr(self, 'ui_scale', 1.0)))
+            self.style.configure('Modern.TCheckbutton',
+                               font=self.fonts['body_bold'],
+                               focuscolor='none')
+            
+            # Configure checkbox indicator size
+            self.style.configure('Modern.TCheckbutton.indicator', 
+                               width=checkbox_size, 
+                               height=checkbox_size)
+            
         def get_current_colors(self):
             """Get current theme colors"""
             return self.colors['dark' if self.is_dark_theme else 'light']
@@ -610,14 +621,30 @@ if tk:
             self.registry_pr_target_branch = tk.StringVar(value=config.get('registry_pr_target_branch', 'master'))
         
         def center_window(self):
-            """Center the window on screen"""
+            """Center the window on screen and ensure it fits"""
             self.root.update_idletasks()
             width = self.root.winfo_width()
             height = self.root.winfo_height()
-            x = (self.root.winfo_screenwidth() // 2) - (width // 2)
-            y = (self.root.winfo_screenheight() // 2) - (height // 2)
+            
+            # Get screen dimensions
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            
+            # Calculate position (centered)
+            x = max(0, (screen_width // 2) - (width // 2))
+            y = max(0, (screen_height // 2) - (height // 2))
+            
+            # Ensure window fits on screen
+            if width > screen_width:
+                width = screen_width
+                x = 0
+            if height > screen_height:
+                height = screen_height
+                y = 0
+                
             self.root.geometry(f'{width}x{height}+{x}+{y}')
-        
+
+
         def create_interface(self):
             """Create the main interface"""
             colors = self.get_current_colors()
@@ -978,12 +1005,10 @@ if tk:
             sparse_desc.pack(anchor=tk.W, pady=(1, 10))  # Reduced padding
             
             # Checkbox
-            self.sparse_checkbox = tk.Checkbutton(sparse_content, 
+            self.sparse_checkbox = ttk.Checkbutton(sparse_content, 
                                                 text="Enable sparse checkout for webroot repository",
                                                 variable=self.enable_sparse_checkout,
-                                                font=self.fonts['body_bold'],
-                                                bg=colors['bg_accent'], fg=colors['text_primary'],
-                                                activebackground=colors['bg_accent'],
+                                                style='Modern.TCheckbutton',
                                                 command=self.toggle_sparse_fields)
             self.sparse_checkbox.pack(anchor=tk.W, pady=(0, 10))  # Reduced padding
             
@@ -1088,10 +1113,12 @@ if tk:
             self.pr_checkbox = tk.Checkbutton(pr_content, 
                                             text="Enable automatic PR creation",
                                             variable=self.enable_pr_creation,
-                                            font=self.fonts['body_bold'],
-                                            bg=colors['bg_accent'], fg=colors['text_primary'],
-                                            activebackground=colors['bg_accent'],
+                                            # font=self.fonts['body_bold'],
+                                            style='Modern.TCheckbutton',
+                                            # bg=colors['bg_accent'], fg=colors['text_primary'],
+                                            # activebackground=colors['bg_accent'],
                                             command=self.toggle_pr_fields)
+                                            
             self.pr_checkbox.pack(anchor=tk.W, pady=(0, 15))
 
             # PR fields frame
