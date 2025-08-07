@@ -5,6 +5,8 @@ import logging
 import argparse
 import yaml
 import threading
+import requests
+import json
 from datetime import datetime
 
 try:
@@ -32,7 +34,9 @@ class ReleasePublisher:
     def __init__(self, source_dir=None, source_repo=None, source_branch=None,
                  webroot_repo=None, webroot_branch=None,
                  history_repo=None, history_branch=None,
-                 sparse_dirs=None, enable_sparse_checkout=False, progress_callback=None):
+                 sparse_dirs=None, enable_sparse_checkout=False, progress_callback=None,
+                 github_token=None, enable_pr_creation=False, 
+                 webroot_pr_target_branch="main", registry_pr_target_branch="master"):
 
         self.base_dir = os.path.abspath(os.path.dirname(__file__))
         self.source_dir = source_dir or os.path.join(self.base_dir, 'source')
@@ -54,6 +58,12 @@ class ReleasePublisher:
         self.sparse_dirs = sparse_dirs
         self.enable_sparse_checkout = enable_sparse_checkout
         self.progress_callback = progress_callback
+        
+        # GitHub PR settings
+        self.github_token = github_token
+        self.enable_pr_creation = enable_pr_creation
+        self.webroot_pr_target_branch = webroot_pr_target_branch
+        self.registry_pr_target_branch = registry_pr_target_branch
 
     def log_progress(self, message):
         logging.info(message)
@@ -94,6 +104,174 @@ class ReleasePublisher:
                 clone_cmd += ['--branch', branch]
             clone_cmd += [url, path]
             self.run_command(clone_cmd)
+
+    def get_repo_info_from_url(self, repo_url):
+        """Extract owner and repo name from GitHub URL"""
+        if 'github.com' in repo_url:
+            # Handle both https and git URLs
+            if repo_url.startswith('https://github.com/'):
+                path = repo_url.replace('https://github.com/', '')
+            elif repo_url.startswith('git@github.com:'):
+                path = repo_url.replace('git@github.com:', '')
+            else:
+                raise ValueError(f"Unsupported repository URL format: {repo_url}")
+            
+            # Remove .git suffix if present
+            if path.endswith('.git'):
+                path = path[:-4]
+            
+            parts = path.split('/')
+            if len(parts) >= 2:
+                return parts[0], parts[1]
+        
+        raise ValueError(f"Could not parse GitHub repository URL: {repo_url}")
+
+    def has_changes(self, repo_path):
+        """Check if repository has uncommitted changes"""
+        try:
+            repo = git.Repo(repo_path)
+            return repo.is_dirty() or len(repo.untracked_files) > 0
+        except Exception as e:
+            self.log_progress(f"Warning: Could not check repository status for {repo_path}: {e}")
+            return False
+
+    def create_branch_and_commit(self, repo_path, branch_name, commit_message):
+        """Create a new branch and commit all changes"""
+        try:
+            repo = git.Repo(repo_path)
+            
+            # Create and checkout new branch
+            new_branch = repo.create_head(branch_name)
+            new_branch.checkout()
+            
+            # Add all changes
+            repo.git.add(A=True)
+            
+            # Commit changes
+            repo.index.commit(commit_message)
+            
+            # Push to origin
+            origin = repo.remote('origin')
+            origin.push(new_branch)
+            
+            self.log_progress(f"Created branch '{branch_name}' and pushed changes")
+            return True
+            
+        except Exception as e:
+            self.log_progress(f"Error creating branch and committing: {e}")
+            return False
+
+    def create_github_pr(self, repo_url, head_branch, base_branch, title, body):
+        """Create a GitHub pull request using the GitHub API"""
+        if not self.github_token:
+            self.log_progress("❌ GitHub token not provided, cannot create PR")
+            return False
+            
+        try:
+            owner, repo_name = self.get_repo_info_from_url(repo_url)
+            
+            # GitHub API endpoint
+            api_url = f"https://api.github.com/repos/{owner}/{repo_name}/pulls"
+            
+            # PR data
+            pr_data = {
+                "title": title,
+                "body": body,
+                "head": head_branch,
+                "base": base_branch
+            }
+            
+            # Headers with authentication
+            headers = {
+                "Authorization": f"token {self.github_token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json"
+            }
+            
+            # Create PR
+            response = requests.post(api_url, json=pr_data, headers=headers)
+            
+            if response.status_code == 201:
+                pr_data = response.json()
+                pr_url = pr_data['html_url']
+                self.log_progress(f"✅ Pull request created: {pr_url}")
+                return True
+            else:
+                error_msg = response.json().get('message', 'Unknown error')
+                self.log_progress(f"❌ Failed to create PR: {error_msg}")
+                return False
+                
+        except Exception as e:
+            self.log_progress(f"❌ Error creating GitHub PR: {e}")
+            return False
+
+    def create_prs_if_needed(self):
+        """Create pull requests for webroot and registry if changes exist"""
+        if not self.enable_pr_creation:
+            self.log_progress("PR creation disabled, skipping...")
+            return
+            
+        self.log_progress("🔍 Checking for changes to create pull requests...")
+        
+        # Generate timestamp for branch names
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        
+        # Check webroot repository
+        if self.has_changes(self.webroot_dir):
+            self.log_progress("📤 Creating PR for webroot repository...")
+            branch_name = f"fhir-ig-update-{timestamp}"
+            commit_message = f"Update FHIR IG content - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            if self.create_branch_and_commit(self.webroot_dir, branch_name, commit_message):
+                pr_title = f"FHIR IG Content Update - {datetime.now().strftime('%Y-%m-%d')}"
+                pr_body = f"""## FHIR Implementation Guide Update
+
+This PR contains updated content from the FHIR IG publishing process.
+
+**Changes include:**
+- Updated templates and assets
+- Generated documentation
+- Resource definitions
+
+**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Source:** {self.source_repo if self.source_repo else 'Local build'}
+"""
+                
+                self.create_github_pr(
+                    self.webroot_repo, 
+                    branch_name, 
+                    self.webroot_pr_target_branch,
+                    pr_title, 
+                    pr_body
+                )
+        else:
+            self.log_progress("No changes in webroot repository, skipping PR")
+        
+        # Check registry repository
+        if self.has_changes(self.registry_dir):
+            self.log_progress("📤 Creating PR for IG registry...")
+            branch_name = f"registry-update-{timestamp}"
+            commit_message = f"Update IG registry - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            if self.create_branch_and_commit(self.registry_dir, branch_name, commit_message):
+                pr_title = f"IG Registry Update - {datetime.now().strftime('%Y-%m-%d')}"
+                pr_body = f"""## Implementation Guide Registry Update
+
+This PR updates the FHIR Implementation Guide registry with latest information.
+
+**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Source:** {self.source_repo if self.source_repo else 'Local build'}
+"""
+                
+                self.create_github_pr(
+                    self.registry_repo,
+                    branch_name,
+                    self.registry_pr_target_branch,
+                    pr_title,
+                    pr_body
+                )
+        else:
+            self.log_progress("No changes in registry repository, skipping PR")
 
     def prepare(self):
         self.log_progress("🔄 Preparing repositories...")
@@ -151,6 +329,10 @@ class ReleasePublisher:
             self.build()
             self.publish()
             self.log_progress("✅ Publication completed successfully!")
+            
+            # Create PRs if enabled and changes exist
+            self.create_prs_if_needed()
+            
         except Exception as e:
             self.log_progress(f"❌ Error: {str(e)}")
             raise
@@ -420,6 +602,12 @@ if tk:
             self.webroot_branch = tk.StringVar(value=config.get('webroot_branch', 'main'))
             self.enable_sparse_checkout = tk.BooleanVar(value=config.get('enable_sparse_checkout', False))
             self.sparse_dirs = tk.StringVar(value=' '.join(config.get('sparse_dirs', ['templates', 'assets'])))
+            
+            # GitHub PR settings
+            self.enable_pr_creation = tk.BooleanVar(value=config.get('enable_pr_creation', False))
+            self.github_token = tk.StringVar(value=config.get('github_token', ''))
+            self.webroot_pr_target_branch = tk.StringVar(value=config.get('webroot_pr_target_branch', 'main'))
+            self.registry_pr_target_branch = tk.StringVar(value=config.get('registry_pr_target_branch', 'master'))
         
         def center_window(self):
             """Center the window on screen"""
@@ -535,6 +723,11 @@ if tk:
             advanced_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'])
             self.notebook.add(advanced_frame, text="⚡  Advanced Options")
             self.create_advanced_tab(advanced_frame)
+            
+            # NEW: GitHub PR tab
+            github_frame = tk.Frame(self.notebook, bg=colors['bg_secondary'])
+            self.notebook.add(github_frame, text="🔀  Pull Requests")
+            self.create_github_tab(github_frame)
         
         def create_field(self, parent, label_text, description, variable, icon=""):
             """Create a well-spaced modern field with label, description, and entry"""
@@ -567,6 +760,40 @@ if tk:
                            highlightcolor=colors['accent'],
                            highlightbackground=colors['border'])
             entry.pack(fill=tk.X, expand=True, ipady=8)  # Better height
+            
+            return entry
+        
+        def create_password_field(self, parent, label_text, description, variable, icon=""):
+            """Create a password field (shows asterisks)"""
+            colors = self.get_current_colors()
+            
+            field_frame = tk.Frame(parent, bg=colors['bg_secondary'])
+            field_frame.pack(fill=tk.X, expand=True, pady=15, padx=20)
+            
+            # Label with icon
+            label_frame = tk.Frame(field_frame, bg=colors['bg_secondary'])
+            label_frame.pack(fill=tk.X)
+            
+            label = tk.Label(label_frame, text=f"{icon} {label_text}" if icon else label_text,
+                           font=self.fonts['body_bold'], 
+                           bg=colors['bg_secondary'], fg=colors['text_primary'])
+            label.pack(anchor=tk.W)
+            
+            # Description with better spacing
+            desc_label = tk.Label(field_frame, text=description,
+                                font=self.fonts['small'], 
+                                bg=colors['bg_secondary'], fg=colors['text_muted'])
+            desc_label.pack(anchor=tk.W, pady=(3, 10))
+            
+            # Password entry field
+            entry = tk.Entry(field_frame, textvariable=variable, show="*",
+                           font=self.fonts['body'],
+                           bg=colors['bg_primary'], fg=colors['text_primary'],
+                           insertbackground=colors['text_primary'],
+                           relief=tk.FLAT, bd=0, highlightthickness=2,
+                           highlightcolor=colors['accent'],
+                           highlightbackground=colors['border'])
+            entry.pack(fill=tk.X, expand=True, ipady=8)
             
             return entry
         
@@ -662,8 +889,6 @@ if tk:
                                  relief=tk.FLAT, 
                                  padx=15, pady=8)  # Better padding
             browse_btn.pack(side=tk.RIGHT, padx=(15, 0))  # Better spacing
-        
-
 
         def create_repository_tab(self, parent):
             """Create repository configuration tab with proper spacing"""
@@ -704,7 +929,6 @@ if tk:
                                 bg=colors['bg_secondary'], fg=colors['text_primary'])
             title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
 
-
             self.create_field(scrollable_frame, "History Repository URL",
                             "Repository containing the IG history template for version management",
                             self.history_repo, "📚")
@@ -721,7 +945,6 @@ if tk:
                             "Branch to use from the webroot repository", 
                             self.webroot_branch, "🌳")
 
-        
             spacer = tk.Frame(scrollable_frame, height=1, bg=colors['bg_secondary'])
             spacer.pack(fill='both', expand=True)
 
@@ -804,6 +1027,118 @@ if tk:
             
             # Initialize sparse field state
             self.toggle_sparse_fields()
+
+        def create_github_tab(self, parent):
+            """Create GitHub PR configuration tab"""
+            colors = self.get_current_colors()
+
+            # Container for canvas + scrollbar
+            scrollable_container = tk.Frame(parent, bg=colors['bg_secondary'])
+            scrollable_container.pack(side="top", fill="both", expand=True)
+
+            # Canvas + scrollbar
+            canvas = tk.Canvas(scrollable_container, bg=colors['bg_secondary'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scrollable_container, orient="vertical", command=canvas.yview)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            scrollable_frame = tk.Frame(canvas, bg=colors['bg_secondary'])
+            window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+            def update_scrollregion(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            scrollable_frame.bind("<Configure>", update_scrollregion)
+
+            def resize_scrollable(event):
+                canvas.itemconfig(window_id, width=event.width)
+            canvas.bind("<Configure>", resize_scrollable)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+            # Content
+            title_label = tk.Label(scrollable_frame, text="Pull Request Configuration",
+                                font=self.fonts['subheading'],
+                                bg=colors['bg_secondary'], fg=colors['text_primary'])
+            title_label.pack(anchor=tk.W, pady=(20, 20), padx=20)
+
+            # PR Enable section
+            pr_frame = tk.Frame(scrollable_frame, bg=colors['bg_accent'], relief=tk.FLAT, bd=1)
+            pr_frame.pack(fill=tk.X, pady=15, padx=20)
+
+            pr_content = tk.Frame(pr_frame, bg=colors['bg_accent'])
+            pr_content.pack(fill=tk.BOTH, padx=20, pady=20)
+
+            # Section title
+            pr_title = tk.Label(pr_content, text="🔀 Automatic Pull Request Creation",
+                              font=self.fonts['body_bold'],
+                              bg=colors['bg_accent'], fg=colors['accent'])
+            pr_title.pack(anchor=tk.W)
+
+            # Description
+            pr_desc = tk.Label(pr_content, 
+                             text="Automatically create pull requests after successful build",
+                             font=self.fonts['small'],
+                             bg=colors['bg_accent'], fg=colors['text_muted'])
+            pr_desc.pack(anchor=tk.W, pady=(5, 15))
+
+            # Enable PR checkbox
+            self.pr_checkbox = tk.Checkbutton(pr_content, 
+                                            text="Enable automatic PR creation",
+                                            variable=self.enable_pr_creation,
+                                            font=self.fonts['body_bold'],
+                                            bg=colors['bg_accent'], fg=colors['text_primary'],
+                                            activebackground=colors['bg_accent'],
+                                            command=self.toggle_pr_fields)
+            self.pr_checkbox.pack(anchor=tk.W, pady=(0, 15))
+
+            # PR fields frame
+            self.pr_fields_frame = tk.Frame(pr_content, bg=colors['bg_accent'])
+            self.pr_fields_frame.pack(fill=tk.X)
+
+            # Create PR configuration fields inside this frame
+            self.create_password_field(scrollable_frame, "GitHub Personal Access Token",
+                                     "Required for creating pull requests. Generate at: Settings > Developer settings > Personal access tokens",
+                                     self.github_token, "🔑")
+
+            self.create_field(scrollable_frame, "Webroot PR Target Branch",
+                            "Target branch for webroot repository pull requests",
+                            self.webroot_pr_target_branch, "🎯")
+
+            self.create_field(scrollable_frame, "Registry PR Target Branch", 
+                            "Target branch for IG registry pull requests",
+                            self.registry_pr_target_branch, "🎯")
+
+            # GitHub token help
+            help_frame = tk.Frame(scrollable_frame, bg=colors['bg_accent'], relief=tk.FLAT, bd=1)
+            help_frame.pack(fill=tk.X, pady=15, padx=20)
+            
+            help_content = tk.Frame(help_frame, bg=colors['bg_accent'])
+            help_content.pack(fill=tk.BOTH, padx=20, pady=15)
+            
+            help_title = tk.Label(help_content, text="ℹ️ GitHub Token Setup",
+                                font=self.fonts['body_bold'],
+                                bg=colors['bg_accent'], fg=colors['warning'])
+            help_title.pack(anchor=tk.W)
+            
+            help_text = tk.Label(help_content,
+                               text="""1. Go to GitHub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)
+2. Click 'Generate new token (classic)'
+3. Select scopes: 'repo' (full control of private repositories)
+4. Copy the token and paste it above
+5. Keep the token secure - it won't be shown again!""",
+                               font=self.fonts['small'],
+                               bg=colors['bg_accent'], fg=colors['text_muted'],
+                               justify=tk.LEFT)
+            help_text.pack(anchor=tk.W, pady=(5, 0))
+
+            # Initialize PR field state
+            self.toggle_pr_fields()
+
+            spacer = tk.Frame(scrollable_frame, height=1, bg=colors['bg_secondary'])
+            spacer.pack(fill='both', expand=True)
         
         def create_action_buttons(self, parent):
             """Create prominent action buttons with proper spacing"""
@@ -877,6 +1212,12 @@ if tk:
                 self.sparse_entry.configure(state='normal')
             else:
                 self.sparse_entry.configure(state='disabled')
+
+        def toggle_pr_fields(self):
+            """Toggle PR configuration fields based on checkbox state"""
+            # This function can be used to show/hide PR fields if needed
+            # Currently all fields are always visible for simplicity
+            pass
         
         def browse_source_directory(self):
             """Open directory browser for source directory"""
@@ -895,7 +1236,12 @@ if tk:
                 'webroot_repo': self.webroot_repo.get(),
                 'webroot_branch': self.webroot_branch.get(),
                 'enable_sparse_checkout': self.enable_sparse_checkout.get(),
-                'sparse_dirs': self.sparse_dirs.get().split() if self.sparse_dirs.get().strip() else []
+                'sparse_dirs': self.sparse_dirs.get().split() if self.sparse_dirs.get().strip() else [],
+                # GitHub PR settings
+                'enable_pr_creation': self.enable_pr_creation.get(),
+                'github_token': self.github_token.get(),
+                'webroot_pr_target_branch': self.webroot_pr_target_branch.get(),
+                'registry_pr_target_branch': self.registry_pr_target_branch.get()
             }
             
             try:
@@ -943,7 +1289,12 @@ if tk:
                         history_branch=self.history_branch.get() or None,
                         sparse_dirs=sparse_dirs,
                         enable_sparse_checkout=self.enable_sparse_checkout.get(),
-                        progress_callback=lambda msg: self.root.after(0, lambda: self.update_progress(msg))
+                        progress_callback=lambda msg: self.root.after(0, lambda: self.update_progress(msg)),
+                        # GitHub PR settings
+                        github_token=self.github_token.get() or None,
+                        enable_pr_creation=self.enable_pr_creation.get(),
+                        webroot_pr_target_branch=self.webroot_pr_target_branch.get(),
+                        registry_pr_target_branch=self.registry_pr_target_branch.get()
                     )
                     
                     # Run publisher
@@ -980,6 +1331,11 @@ def main():
     parser.add_argument('--history-branch', type=str, help='History branch name')
     parser.add_argument('--sparse', nargs='*', help='Sparse checkout folders for webroot')
     parser.add_argument('--enable-sparse', action='store_true', help='Enable sparse checkout')
+    # GitHub PR arguments
+    parser.add_argument('--enable-pr', action='store_true', help='Enable automatic PR creation')
+    parser.add_argument('--github-token', type=str, help='GitHub personal access token')
+    parser.add_argument('--webroot-pr-target', type=str, default='main', help='Webroot PR target branch')
+    parser.add_argument('--registry-pr-target', type=str, default='master', help='Registry PR target branch')
     args = parser.parse_args()
 
     if args.gui:
@@ -998,7 +1354,11 @@ def main():
             history_repo=args.history_repo,
             history_branch=args.history_branch,
             sparse_dirs=args.sparse,
-            enable_sparse_checkout=args.enable_sparse
+            enable_sparse_checkout=args.enable_sparse,
+            github_token=args.github_token,
+            enable_pr_creation=args.enable_pr,
+            webroot_pr_target_branch=args.webroot_pr_target,
+            registry_pr_target_branch=args.registry_pr_target
         )
         publisher.run()
 
