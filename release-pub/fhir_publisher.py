@@ -38,94 +38,125 @@ class ReleasePublisher:
                  webroot_repo=None, webroot_branch=None,
                  history_repo=None, history_branch=None,
                  sparse_dirs=None, enable_sparse_checkout=False):
+        # ... existing init ...
+        self._last_cmd_output = ""   # keep last command output for GUI error details
+        self._log_file = os.path.join(self.base_dir, 'run.log')
 
-        self.base_dir = os.path.abspath(os.path.dirname(__file__))
-        self.source_dir = source_dir or os.path.join(self.base_dir, 'source')
-        self.source_repo = source_repo
-        self.source_branch = source_branch
-        self.webroot_repo = webroot_repo or 'https://github.com/WorldHealthOrganization/smart-html'
-        self.webroot_branch = webroot_branch
-        self.history_repo = history_repo or 'https://github.com/HL7/fhir-ig-history-template'
-        self.history_branch = history_branch
-        self.registry_repo = 'https://github.com/FHIR/ig-registry'
+    # --- new helpers ---
+    def _write_log(self, text: str):
+        try:
+            with open(self._log_file, 'a', encoding='utf-8') as f:
+                f.write(text if text.endswith('\n') else text + '\n')
+        except Exception:
+            pass
 
-        self.webroot_dir = os.path.join(self.base_dir, 'webroot')
-        self.history_dir = os.path.join(self.base_dir, 'history-template')
-        self.registry_dir = os.path.join(self.base_dir, 'ig-registry')
-        self.package_cache = os.path.join(self.base_dir, 'fhir-package-cache')
-        self.temp_dir = os.path.join(self.base_dir, 'temp')
-        self.publisher_jar = os.path.join(self.base_dir, 'publisher.jar')
-        
-        # Updated sparse checkout logic
-        self.sparse_dirs = sparse_dirs
-        self.enable_sparse_checkout = enable_sparse_checkout
+    def _is_github_https(self, url: str) -> bool:
+        return isinstance(url, str) and url.startswith('https://github.com/')
 
-    def run_command(self, cmd, shell=False):
-        logging.info(f"Running command: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-        subprocess.run(cmd, shell=shell, check=True)
+    def _has_token(self) -> bool:
+        return bool(os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN'))
 
-    def clone_repo(self, url, path, branch=None, use_sparse=False, sparse_dirs=None):
-        if os.path.exists(path):
-            logging.info(f"{path} already exists, updating...")
-            try:
-                repo = git.Repo(path)
-                repo.git.reset('--hard')
-                repo.remotes.origin.pull()
-            except Exception as e:
-                logging.warning(f"Failed to update {path}, continuing anyway: {e}")
-            return
-            
-        # Use sparse checkout only if explicitly enabled AND sparse_dirs provided
-        if use_sparse and sparse_dirs:
-            self.run_command(['git', 'clone', '--depth=1', '--filter=blob:none', '--sparse', url, path])
-            original_cwd = os.getcwd()
-            os.chdir(path)
-            try:
-                self.run_command(['git', 'sparse-checkout', 'init'])
-                self.run_command(['git', 'sparse-checkout', 'set'] + sparse_dirs)
-            finally:
-                os.chdir(original_cwd)
-        else:
-            clone_cmd = ['git', 'clone', '--depth=1']
-            if branch:
-                clone_cmd += ['--branch', branch]
-            clone_cmd += [url, path]
-            self.run_command(clone_cmd)
+    def preflight(self):
+        # Java present?
+        try:
+            cp = subprocess.run(['java', '-version'],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True, check=True)
+            self._write_log(cp.stdout or "")
+        except Exception as e:
+            raise RuntimeError(
+                "Java runtime not found in PATH. Please install Java 17+ (or compatible) and retry."
+            ) from e
 
-    def prepare(self):
-        self.clone_repo(self.history_repo, self.history_dir, self.history_branch)
-        
-        # Only use sparse checkout for webroot if explicitly enabled
-        self.clone_repo(
-            self.webroot_repo, 
-            self.webroot_dir, 
-            self.webroot_branch, 
-            use_sparse=self.enable_sparse_checkout,
-            sparse_dirs=self.sparse_dirs
+        # Early token check (warn or fail) – fail if clearly needed
+        if self._is_github_https(self.webroot_repo) and not self._has_token():
+            # Publisher will try to push; without a token this is very likely to fail.
+            # Raise a clear error so the GUI reports it immediately.
+            raise RuntimeError(
+                "No GitHub token detected (GITHUB_TOKEN or GH_TOKEN). "
+                "Publishing to GitHub over HTTPS requires a token with 'repo' scope."
+            )
+
+    # --- REPLACE run_command with the capturing version ---
+    def run_command(self, cmd, shell=False, detect_errors=False, error_patterns=None):
+        """
+        Run a command, capture combined stdout+stderr, log it, and optionally detect errors
+        even when the exit code is zero (by scanning for error patterns).
+        """
+        display = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+        logging.info(f"Running command: {display}")
+        self._write_log(f"$ {display}")
+
+        proc = subprocess.Popen(
+            cmd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
         )
-        
-        self.clone_repo(self.registry_repo, self.registry_dir)
+        out, _ = proc.communicate()
+        out = out or ""
+        self._last_cmd_output = out
+        # write full output to log file
+        if out:
+            self._write_log(out)
 
-        if self.source_repo:
-            self.clone_repo(self.source_repo, self.source_dir, self.source_branch)
+        rc = proc.returncode
+        if rc != 0:
+            # raise and attach output
+            err = subprocess.CalledProcessError(rc, cmd, output=out)
+            raise err
 
-        if not os.path.exists(self.publisher_jar):
-            self.run_command([
-                'curl', '-L',
-                'https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar',
-                '-o', self.publisher_jar
-            ])
+        if detect_errors:
+            patterns = error_patterns or []
+            # default generic patterns that usually indicate failure
+            generic = [
+                r"\bFATAL\b",
+                r"\bERROR\b",
+                r"Traceback \(most recent call last\):",
+                r"\bfatal:\b",
+                r"Authentication failed",
+                r"Permission denied",
+                r"HTTP\s*(401|403)",
+                r"failed to push",
+                r"could not read Username",
+                r"non-fast-forward",
+                r"BUILD FAILED",
+            ]
+            import re
+            hay = out
+            for p in (patterns + generic):
+                if re.search(p, hay, flags=re.IGNORECASE):
+                    # Allow known non-fatal 'warning' noise by filtering if needed.
+                    # For now treat as fatal so the GUI surfaces it.
+                    raise RuntimeError(
+                        f"Command reported an error pattern: {p}\n"
+                        f"See run.log for full output."
+                    )
 
-        os.makedirs(self.package_cache, exist_ok=True)
+        return out
 
+    # --- update build/publish to use detect_errors=True with hints ---
     def build(self):
+        # the publisher sometimes logs 'ERROR' but exits 0; detect_errors catches it
         self.run_command([
             'java', '-Xmx4g', '-jar', self.publisher_jar,
             'publisher', '-ig', self.source_dir,
             '-package-cache-folder', self.package_cache
-        ])
+        ], detect_errors=True)
 
     def publish(self):
+        # Add patterns specifically for git/publish failures
+        error_patterns = [
+            r"git push.*failed",
+            r"remote: Permission to .* denied",
+            r"fatal: Authentication failed",
+            r"fatal: could not read Username",
+            r"error: failed to push",
+            r"ERROR:.*publish",
+        ]
+
         self.run_command([
             'java', '-Xmx4g', '-Dfile.encoding=UTF-8', '-jar', self.publisher_jar,
             '-go-publish',
@@ -136,9 +167,11 @@ class ReleasePublisher:
             '-registry', os.path.join(self.registry_dir, 'fhir-ig-list.json'),
             '-history', self.history_dir,
             '-templates', os.path.join(self.webroot_dir, 'templates')
-        ])
+        ], detect_errors=True, error_patterns=error_patterns)
 
     def run(self):
+        # fail-fast on obvious preconditions; lets the GUI show a clear message
+        self.preflight()
         self.prepare()
         self.build()
         self.publish()
@@ -309,7 +342,7 @@ if tk:
                     sparse_dirs = None
                     if self.enable_sparse_checkout.get() and self.sparse_dirs.get().strip():
                         sparse_dirs = self.sparse_dirs.get().split()
-                    
+
                     pub = ReleasePublisher(
                         source_dir=self.source_dir.get() or None,
                         source_repo=self.source_repo.get() or None,
@@ -321,16 +354,43 @@ if tk:
                         sparse_dirs=sparse_dirs,
                         enable_sparse_checkout=self.enable_sparse_checkout.get()
                     )
+
                     pub.run()
-                    
+
+                    # only if everything completed with no raised errors:
                     self.root.after(0, lambda: messagebox.showinfo("Success", "🎉 Publication completed!"))
-                    
+
+                except subprocess.CalledProcessError as e:
+                    # Non-zero exit – show tail of captured output
+                    output = getattr(e, 'output', '') or ''
+                    tail = '\n'.join(output.splitlines()[-30:]) if output else '(no output)'
+                    msg = (
+                        f"Command failed (exit {e.returncode}): "
+                        f"{' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}\n\n"
+                        f"Last output lines:\n{tail}\n\n"
+                        f"See run.log for full details."
+                    )
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"❌ {msg}"))
                 except Exception as e:
-                    self.root.after(0, lambda: messagebox.showerror("Error", f"❌ Error: {str(e)}"))
-                    
+                    # Patterns caught here (detect_errors=True) – show last lines if we have them
+                    last = ""
+                    try:
+                        # best-effort: try to read tail of run.log
+                        import pathlib
+                        log_path = pathlib.Path(os.path.abspath('run.log'))
+                        if log_path.exists():
+                            text = log_path.read_text(encoding='utf-8', errors='ignore')
+                            last = '\n'.join(text.splitlines()[-30:])
+                    except Exception:
+                        pass
+
+                    base = f"{str(e)}"
+                    msg = base if not last else f"{base}\n\nLast output lines:\n{last}"
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"❌ {msg}\n\n(Details saved to run.log)"))
+
             thread = threading.Thread(target=run_in_thread, daemon=True)
             thread.start()
-            
+
         def run(self):
             self.root.mainloop()
 

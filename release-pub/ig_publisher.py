@@ -8,6 +8,7 @@ import threading
 import requests
 import json
 from datetime import datetime
+from copy import deepcopy
 
 try:
     import git
@@ -373,11 +374,47 @@ This PR updates the FHIR Implementation Guide registry with latest information.
             self.log_progress(f"❌ Error: {str(e)}")
             raise
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+
+# --- add helpers ---
+def _load_yaml_maybe(path):
+    if not path:
+        return {}
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            try:
+                data = yaml.safe_load(f) or {}
+                if not isinstance(data, dict):
+                    logging.warning(f"{path} did not parse to a mapping; ignoring.")
+                    return {}
+                return data
+            except Exception as e:
+                logging.warning(f"Failed to parse YAML {path}: {e}")
+                return {}
     return {}
+
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """Return a deep merge of two dicts without mutating inputs (override wins)."""
+    result = deepcopy(base)
+    for k, v in (override or {}).items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge_dicts(result[k], v)
+        else:
+            result[k] = deepcopy(v)
+    return result
+
+# --- replace your existing load_config() with this ---
+def load_config(global_path=None, local_path="release-config.yaml"):
+    """
+    Load config by deep-merging:
+      1) global defaults (from smart-html)
+      2) local overrides (from caller repo)
+    Local overrides win per key.
+    """
+    global_cfg = _load_yaml_maybe(global_path)
+    local_cfg = _load_yaml_maybe(local_path)
+    merged = _deep_merge_dicts(global_cfg, local_cfg)
+    return merged
+
 
 def save_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -514,7 +551,9 @@ if tk:
             self.setup_styles()
             
             # Load configuration
-            config = load_config()
+            # For local runs, there probably is no global config; this call handles None gracefully
+            config = load_config(global_path=os.environ.get("GLOBAL_RELEASE_CONFIG"), local_path="release-config.yaml")
+
             self.setup_variables(config)
             
             # Store custom checkboxes for theme updates
@@ -1521,6 +1560,9 @@ def main():
     parser.add_argument('--github-token', type=str, help='GitHub personal access token')
     parser.add_argument('--webroot-pr-target', type=str, default='main', help='Webroot PR target branch')
     parser.add_argument('--registry-pr-target', type=str, default='master', help='Registry PR target branch')
+    parser.add_argument('--global-config', type=str, help='Path to global default release-config.yaml')
+    parser.add_argument('--local-config', type=str, default='release-config.yaml', help='Path to repo-specific release-config.yaml')
+
     args = parser.parse_args()
 
     # Check for GitHub Actions environment
@@ -1535,21 +1577,23 @@ def main():
         gui = ModernFHIRPublisherGUI()
         gui.run()
     else:
+        # Load merged config first (if you still read values from config elsewhere)
+        config = load_config(global_path=args.global_config or os.environ.get("GLOBAL_RELEASE_CONFIG"),
+                            local_path=args.local_config)
+
+        # ... then proceed to use args or config as you already do ...
         publisher = ReleasePublisher(
-            source_dir=args.source,
-            source_repo=args.source_repo,
-            source_branch=args.source_branch,
-            webroot_repo=args.webroot_repo,
-            webroot_branch=args.webroot_branch,
-            history_repo=args.history_repo,
-            history_branch=args.history_branch,
-            sparse_dirs=args.sparse,
-            enable_sparse_checkout=args.enable_sparse,
-            github_token=args.github_token,
-            enable_pr_creation=args.enable_pr,
-            webroot_pr_target_branch=args.webroot_pr_target,
-            registry_pr_target_branch=args.registry_pr_target
+            source_dir=args.source or config.get('source_dir'),
+            source_repo=args.source_repo or config.get('source_repo'),
+            source_branch=args.source_branch or config.get('source_branch'),
+            webroot_repo=args.webroot_repo or config.get('webroot_repo'),
+            webroot_branch=args.webroot_branch or config.get('webroot_branch'),
+            history_repo=args.history_repo or config.get('history_repo'),
+            history_branch=args.history_branch or config.get('history_branch'),
+            sparse_dirs=args.sparse or config.get('sparse_dirs'),
+            enable_sparse_checkout=args.enable_sparse or config.get('enable_sparse_checkout', False),
         )
+
         publisher.run()
 
 if __name__ == '__main__':

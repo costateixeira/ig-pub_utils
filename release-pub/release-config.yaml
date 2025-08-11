@@ -1,5 +1,5 @@
 enable_pr_creation: true
-enable_sparse_checkout: false
+enable_sparse_checkout: true
 github_token: ''
 history_branch: master
 history_repo: https://github.com/HL7/fhir-ig-history-template
@@ -9,7 +9,7 @@ source_dir: ''
 source_repo: https://github.com/WorldHealthOrganization/smart-dak-pnc
 sparse_dirs:
 - templates
-- assets
+- dak-pnc
 webroot_branch: main
 webroot_pr_target_branch: main
 webroot_repo: https://github.com/WorldHealthOrganization/smart-html
